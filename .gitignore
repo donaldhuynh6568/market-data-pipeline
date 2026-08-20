@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# Local data cache
+data/
+*.parquet
+*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.python-version

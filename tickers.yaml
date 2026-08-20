@@ -1,0 +1,31 @@
+# Ticker universe for the rotation-strategy data pipeline.
+# Add new symbols under the relevant category — collector scripts read this file
+# at runtime, so growing the universe never means touching code.
+#
+# equities: anything Alpaca trades as a stock/ETF (also used for options collection)
+# crypto: Alpaca crypto pairs, format SYMBOL/USD
+
+equities:
+  broad_market:
+    - SPY
+    - QQQ
+    - IWM
+  international:
+    - EFA
+    - EEM
+  defensive:
+    - TLT
+    - SHV
+  sectors:
+    - XLE
+    - XLU
+    - XLP
+    - XLC
+    - XLV
+  alternative:
+    - GLD
+    - SLV
+
+crypto:
+  - BTC/USD
+  - ETH/USD
