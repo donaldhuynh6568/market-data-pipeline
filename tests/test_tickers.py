@@ -1,4 +1,6 @@
-from market_data_pipeline.tickers import load_tickers_from_dict
+import yaml
+
+from market_data_pipeline.tickers import load_equity_category, load_tickers_from_dict
 
 
 def test_load_tickers_from_dict_flattens_equities_and_keeps_crypto():
@@ -16,3 +18,17 @@ def test_load_tickers_from_dict_flattens_equities_and_keeps_crypto():
         "equities": ["SPY", "QQQ", "XLE", "XLV"],
         "crypto": ["BTC/USD", "ETH/USD"],
     }
+
+
+def test_load_equity_category_returns_only_requested_category(tmp_path):
+    raw = {
+        "equities": {
+            "broad_market": ["SPY", "QQQ"],
+            "large_cap": ["AAPL", "MSFT"],
+        }
+    }
+    path = tmp_path / "tickers.yaml"
+    path.write_text(yaml.dump(raw), encoding="utf-8")
+
+    assert load_equity_category("large_cap", path) == ["AAPL", "MSFT"]
+    assert load_equity_category("missing_category", path) == []

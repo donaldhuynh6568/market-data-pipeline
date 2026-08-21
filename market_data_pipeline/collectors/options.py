@@ -114,12 +114,15 @@ def add_chain_snapshot(
 
     iv_map: dict[str, float | None] = {}
     delta_map: dict[str, float | None] = {}
+    gamma_map: dict[str, float | None] = {}
     for contract_symbol, snap in chain.items():
         iv_map[contract_symbol] = snap.implied_volatility
         delta_map[contract_symbol] = snap.greeks.delta if snap.greeks else None
+        gamma_map[contract_symbol] = snap.greeks.gamma if snap.greeks else None
 
     contracts_df["implied_volatility"] = contracts_df["contract_symbol"].map(iv_map)
     contracts_df["delta"] = contracts_df["contract_symbol"].map(delta_map)
+    contracts_df["gamma"] = contracts_df["contract_symbol"].map(gamma_map)
     return contracts_df
 
 

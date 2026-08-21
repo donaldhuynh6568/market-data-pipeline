@@ -10,6 +10,25 @@ equities:
     - SPY
     - QQQ
     - IWM
+  large_cap:
+    - AAPL
+    - MSFT
+    - NVDA
+    - AMZN
+    - GOOGL
+    - META
+    - TSLA
+    - JPM
+    - V
+    - UNH
+    - XOM
+    - JNJ
+    - WMT
+    - PG
+    - MA
+    - HD
+    - AVGO
+    - LLY
   international:
     - EFA
     - EEM

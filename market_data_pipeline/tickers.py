@@ -25,3 +25,10 @@ def load_tickers(path: str | Path = TICKERS_PATH) -> dict[str, list[str]]:
     with open(path, encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     return load_tickers_from_dict(raw)
+
+
+def load_equity_category(category: str, path: str | Path = TICKERS_PATH) -> list[str]:
+    """Return just one equities category (e.g. "large_cap") without flattening the rest."""
+    with open(path, encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+    return list(raw.get("equities", {}).get(category, []))

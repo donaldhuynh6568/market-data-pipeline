@@ -20,13 +20,22 @@ market-data-pipeline/
 │   ├── tickers.py
 │   ├── storage.py
 │   ├── combine.py
-│   └── collectors/
+│   ├── collectors/
+│   │   ├── __init__.py
+│   │   ├── price.py
+│   │   ├── options.py
+│   │   ├── cot.py
+│   │   ├── fred.py
+│   │   ├── sec.py
+│   │   ├── congress.py
+│   │   ├── insider.py
+│   │   └── institutional.py
+│   └── transforms/
 │       ├── __init__.py
-│       ├── price.py
-│       └── options.py
-├── common.py
+│       └── gex.py
 ├── collect_price_data.py
 ├── collect_options_data.py
+├── collect_cot_data.py
 ├── combine.py
 ├── tickers.yaml
 ├── pyproject.toml
@@ -59,6 +68,14 @@ uv sync
 ALPACA_API_KEY=your_alpaca_api_key
 ALPACA_SECRET_KEY=your_alpaca_secret_key
 
+# Required for the FRED collector — free key from
+# https://fred.stlouisfed.org/docs/api/api_key.html
+FRED_API_KEY=your_fred_api_key
+
+# Required for the SEC collectors (filings, insider, institutional). SEC's
+# fair-use policy requires a descriptive User-Agent with contact info.
+SEC_USER_AGENT=YourApp your-email@example.com
+
 # Optional
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your_supabase_key
@@ -82,7 +99,96 @@ uv run python -m market_data_pipeline.collectors.price --days 90
 uv run python -m market_data_pipeline.collectors.options --moneyness 0.20 --max-expiry-days 60
 ```
 
-### 3) Combine the parquet files into Excel
+### 3) Collect CFTC COT positioning data for metals
+
+This is a complementary data source focused on large-speculator positioning in metals markets such as gold and silver. The current public source in this repo is the CFTC public reporting API, which returns weekly managed-money and positioning data in JSON form and is normalized before being filtered to gold/silver rows.
+
+```bash
+uv run python -m market_data_pipeline.collectors.cot --source-url "https://publicreporting.cftc.gov/api/v3/views/kh3c-gbw2/query.json"
+```
+
+You can also point to a local CSV, JSON, TXT, or ZIP file:
+
+```bash
+uv run python -m market_data_pipeline.collectors.cot --csv-path "./data/cot_raw.json"
+```
+
+Or set the environment variable once in `.env`:
+
+```env
+CFTC_COT_URL=https://publicreporting.cftc.gov/api/v3/views/kh3c-gbw2/query.json
+```
+
+This writes a parquet file to `data/cot_data.parquet`.
+
+### 4) Calculate gamma exposure (GEX) from the options chain
+
+```bash
+uv run python -m market_data_pipeline.transforms.gex
+```
+
+Reads `data/options_data.parquet` (must have been collected with gamma
+present) and writes `data/gex_data.parquet` with per-symbol total/call/put
+gamma, gamma-wall strikes, and a `gamma_flip` estimate.
+
+### 5) Collect FRED macroeconomic data
+
+```bash
+uv run python -m market_data_pipeline.collectors.fred
+```
+
+Collects a curated set of Federal Reserve, Treasury yield, inflation,
+employment, growth, liquidity, dollar, and volatility series (see
+`DEFAULT_SERIES` in `market_data_pipeline/collectors/fred.py`), overridable
+with `--series`. Writes `data/fred_data.parquet`. Stores only the latest
+value per series — see [DATA_DEFINITION.md](C:/Users/kimje/Documents/market-data-pipeline/DATA_DEFINITION.md)
+for the revision/vintage-data caveat.
+
+### 6) Collect SEC EDGAR filing metadata
+
+```bash
+uv run python -m market_data_pipeline.collectors.sec
+```
+
+Looks up each configured equity ticker's CIK and collects recent 10-K/10-Q/8-K
+filing metadata (overridable with `--forms`). Writes `data/sec_filings.parquet`.
+Most meaningful for the `large_cap` tickers — ETFs file different form types.
+
+### 7) Collect Senate trading disclosures (historical)
+
+```bash
+uv run python -m market_data_pipeline.collectors.congress
+```
+
+Pulls from the community-maintained Senate Stock Watcher dataset, filtered to
+the configured ticker universe. **This source only covers 2012-06-14 through
+2020-12-02** — it is not a live feed (see DATA_DEFINITION.md). Writes
+`data/congress_trades.parquet`.
+
+### 8) Collect corporate insider transactions (Form 4)
+
+```bash
+uv run python -m market_data_pipeline.collectors.insider
+```
+
+For each `large_cap` ticker, fetches recent SEC Form 4 filings and parses
+non-derivative (plain stock buy/sell) transactions. Writes
+`data/insider_trades.parquet`. This makes many SEC requests (one per filing
+found) — expect it to take longer than the other collectors.
+
+### 9) Collect institutional 13F holdings
+
+```bash
+uv run python -m market_data_pipeline.collectors.institutional
+```
+
+Pulls the latest Form 13F holdings for a curated watchlist of well-known
+institutional investors (Berkshire Hathaway, Bridgewater, Scion, Pershing
+Square, Renaissance Technologies — see `DEFAULT_WATCHLIST` in
+`market_data_pipeline/collectors/institutional.py`), overridable with
+`--only`. Writes `data/institutional_holdings.parquet`.
+
+### 10) Combine the parquet files into Excel
 
 ```bash
 uv run python -m market_data_pipeline.combine
@@ -93,6 +199,7 @@ The shortcut wrappers still work too:
 ```bash
 uv run collect_price_data.py --days 90
 uv run collect_options_data.py --moneyness 0.20 --max-expiry-days 60
+uv run collect_cot_data.py 
 uv run combine.py
 ```
 
@@ -115,11 +222,19 @@ equities:
     - SPY
     - QQQ
     - IWM
+  large_cap:
+    - AAPL
+    - MSFT
+    - NVDA
 
 crypto:
   - BTC/USD
   - ETH/USD
 ```
+
+The `large_cap` category holds individual stocks (as opposed to the ETF
+categories above) — the SEC, insider, and 13F-adjacent collectors are far
+more meaningful for operating companies than for ETF shares.
 
 You can add or remove symbols without touching the code logic.
 
@@ -129,6 +244,13 @@ When the collection scripts run, they generate files inside `data/`:
 
 - `price_data.parquet`
 - `options_data.parquet`
+- `cot_data.parquet`
+- `gex_data.parquet`
+- `fred_data.parquet`
+- `sec_filings.parquet`
+- `congress_trades.parquet`
+- `insider_trades.parquet`
+- `institutional_holdings.parquet`
 - `market_data.xlsx`
 
 These are local runtime artifacts and should not be committed to source control.
