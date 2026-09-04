@@ -4,6 +4,8 @@
 #
 # equities: anything Alpaca trades as a stock/ETF (also used for options collection)
 # crypto: Alpaca crypto pairs, format SYMBOL/USD
+# futures: Yahoo Finance continuous-contract tickers (format SYMBOL=F) — Alpaca has
+# no futures data at all, so these are collected from a separate free source
 
 equities:
   broad_market:
@@ -18,20 +20,17 @@ equities:
     - GOOGL
     - META
     - TSLA
+    - FICO
     - JPM
     - V
     - UNH
-    - XOM
-    - JNJ
-    - WMT
     - PG
     - MA
     - HD
+    - SPCX
     - AVGO
     - LLY
-  international:
-    - EFA
-    - EEM
+    - ASML
   defensive:
     - TLT
     - SHV
@@ -48,3 +47,8 @@ equities:
 crypto:
   - BTC/USD
   - ETH/USD
+
+futures:
+  - MNQ=F  # Micro E-mini Nasdaq-100 (QQQ-linked)
+  - MES=F  # Micro E-mini S&P 500 (SPY-linked)
+  - SIL=F  # Micro Silver (SLV-linked)

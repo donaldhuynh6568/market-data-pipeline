@@ -32,3 +32,9 @@ def load_equity_category(category: str, path: str | Path = TICKERS_PATH) -> list
     with open(path, encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     return list(raw.get("equities", {}).get(category, []))
+
+
+def load_futures_tickers(path: str | Path = TICKERS_PATH) -> list[str]:
+    with open(path, encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+    return list(raw.get("futures", []))

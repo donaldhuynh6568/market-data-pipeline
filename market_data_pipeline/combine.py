@@ -21,6 +21,12 @@ OPTIONAL_SHEETS = {
     "congress": ("congress_trades.parquet", "Congress Trades"),
     "insider": ("insider_trades.parquet", "Insider Trades"),
     "institutional": ("institutional_holdings.parquet", "13F Holdings"),
+    "price_1h": ("price_data_1h.parquet", "Price 1H"),
+    "price_4h": ("price_data_4h.parquet", "Price 4H"),
+    "swing_1h": ("swing_structure_1h.parquet", "Swing Structure 1H"),
+    "swing_4h": ("swing_structure_4h.parquet", "Swing Structure 4H"),
+    "futures_volume": ("futures_volume_5m.parquet", "Futures Volume 5m"),
+    "volume_floor": ("volume_floor_5m.parquet", "Volume Floor 5m"),
 }
 
 

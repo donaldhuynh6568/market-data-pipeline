@@ -1,0 +1,30 @@
+# Scheduled FOMC meeting decision dates (the second day of each two-day meeting,
+# when the rate decision is announced). The Fed publishes these ~1-2 years in
+# advance at https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+#
+# This list is hand-maintained — add new dates as the Fed publishes future
+# schedules, and double check upcoming entries against the link above since
+# schedules occasionally shift. The collector cross-references each date
+# against FRED's DFEDTARU/DFEDTARL series to determine the actual decision,
+# so entries here only need the date.
+
+meetings:
+  # 2025
+  - date: "2025-01-29"
+  - date: "2025-03-19"
+  - date: "2025-05-07"
+  - date: "2025-06-18"
+  - date: "2025-07-30"
+  - date: "2025-09-17"
+  - date: "2025-10-29"
+  - date: "2025-12-10"
+  # 2026 — verify against the official calendar before relying on these;
+  # published schedules can shift and this list has not been independently confirmed.
+  # - date: "2026-01-28"
+  # - date: "2026-03-18"
+  # - date: "2026-04-29"
+  # - date: "2026-06-17"
+  # - date: "2026-07-29"
+  # - date: "2026-09-16"
+  # - date: "2026-10-28"
+  # - date: "2026-12-09"

@@ -10,6 +10,8 @@ The price collector pulls daily OHLCV bars for the ticker universe in `tickers.y
 - Default collection frequency: daily bars
 - Lookback range: configurable with `--days` in the price collector
 - Example: `uv run python -m market_data_pipeline.collectors.price --days 30`
+- Intraday bars (1-hour, 4-hour) are also available via `--timeframe` — see
+  section 2 below.
 
 ### What each row contains
 Each row is a bar for a specific symbol and timestamp. Typical fields include:
@@ -27,12 +29,93 @@ These rows are the baseline market data used to understand broad price movement 
 
 ### Future modifications
 If you want more detail later, you could add:
-- intraday intervals (e.g. 1-minute, 5-minute)
+- finer intraday intervals (e.g. 1-minute, 5-minute — 1-hour and 4-hour exist today)
 - custom date windows
 - asset-specific metadata
 - alternate providers or granular bar intervals
 
-## 2) Options data
+## 2) Intraday price data, swing structure, and the equity volume-floor check
+
+Built to close specific gaps: `reference/orderflow_strategy_playbook.md`'s
+Environment step needs higher-timeframe (1H/4H) swing structure, which daily
+bars can't provide; and checking whether a move has real participation
+behind it needs 5-minute granularity. This section covers the intraday bars
+themselves and the two transforms built on top of them.
+
+### Intraday bars
+Same collector as daily bars (`market_data_pipeline/collectors/price.py`),
+selected with `--timeframe`:
+- `--timeframe 1Hour` → `data/price_data_1h.parquet`
+- `--timeframe 4Hour` → `data/price_data_4h.parquet`
+- `--timeframe 5Min` → `data/price_data_5m.parquet`
+- `--timeframe 1Day` (default) → `data/price_data.parquet`, unchanged from
+  before — intraday runs never overwrite the daily dataset.
+
+Confirmed during development: all three intraday timeframes work with the
+same Alpaca credentials already used for daily bars — no paid SIP tier is
+required for aggregated intraday bars (that requirement is specific to raw
+tick/quote data, a separate and still-unbuilt gap — see
+`reference/orderflow_pipeline_buildout_plan.md` §4-5).
+
+### Swing structure
+`market_data_pipeline/transforms/swing_structure.py` reads a
+`price_data_{1h,4h}.parquet` file and writes
+`data/swing_structure_{1h,4h}.parquet`, one row per symbol.
+
+**Swing point definition:** a bar's `high` (or `low`) is a confirmed swing
+point only if it's the strict extreme within `--window` bars (default 3) on
+*both* sides. This means the most recent `window` bars can never be
+confirmed yet — a swing can't be identified until price has moved away from
+it. This is expected lag, not a bug.
+
+**Structure classification** (compares the last 2 confirmed swing highs and
+last 2 confirmed swing lows):
+- `UPTREND` — higher high and higher low
+- `DOWNTREND` — lower high and lower low
+- `SIDEWAYS` — mixed (higher high but lower low, or vice versa)
+- `UNKNOWN` — fewer than 2 swing highs or lows confirmed yet. This is a
+  "not enough history" state, not an actual sideways read — treat it as
+  "no opinion yet," not as a genuine flat market. Confirmed live during
+  development: `SHV` (a low-volatility short-term Treasury ETF) returned
+  `UNKNOWN` on the 4H timeframe simply because it doesn't move enough to
+  produce two confirmed swings in a 30-day window.
+
+Output fields: `symbol`, `structure`, and the actual `last_swing_high` /
+`prior_swing_high` / `last_swing_low` / `prior_swing_low` values and
+timestamps used to derive it — the classification is always auditable back
+to the specific bars that produced it, not a black box.
+
+### Equity volume-floor check
+`market_data_pipeline/transforms/volume_floor.py` reads
+`data/price_data_5m.parquet` and writes `data/volume_floor_5m.parquet`.
+Same underlying idea as the futures volume-floor check (§11) — "does this
+move have real participation behind it" — but **calibrated to each symbol's
+own trailing history instead of one borrowed fixed number**. A 20,000-
+contract floor means something for MNQ; it means nothing for a stock like
+ASML, whose typical 5-minute volume is a small fraction of that. Defaults to
+the `large_cap` tickers (override with `--symbols`).
+
+**Baseline calculation:** for each bar, `baseline_volume` is the trailing
+rolling mean of the prior `--window` bars (default 20, ≈100 minutes) for
+that same symbol — computed with `shift(1)` before the rolling mean so the
+current bar never contributes to its own baseline (a real spike would
+otherwise partially absorb itself into the number it's being compared
+against). `NaN` until a symbol has accumulated `window` bars of history —
+expected, not a bug, same "not enough data yet" pattern used elsewhere in
+this pipeline (e.g. swing structure's `UNKNOWN`).
+
+**Flag:** `volume_ratio = volume / baseline_volume`;
+`volume_floor_met = volume_ratio >= --multiplier` (default 2.0 — a bar needs
+at least double its own symbol's recent average to be flagged). Both the
+window and multiplier are tunable starting points, not fixed truths — same
+spirit as the `unusual_activity` threshold in the options collector below.
+
+Confirmed during development across the `large_cap` universe: baseline
+volumes ranged from ~7,500 (ASML) to ~665,000 (NVDA) — roughly a 90x spread
+— which is exactly why a single shared threshold wouldn't work here the way
+it does for the three futures contracts in §11.
+
+## 3) Options data
 
 The options collector filters the option chain around each equity and pulls data for active contracts with the highest signal value.
 
@@ -67,7 +150,7 @@ Each row includes:
 - `spot_price`
 - `snapshot_date`
 
-## 3) CFTC COT positioning data
+## 4) CFTC COT positioning data
 
 The COT collector is intended as a complementary data source for metals focused on larger positioning trends rather than single-contract option flow.
 
@@ -117,7 +200,7 @@ If you add more metals or contract groups later, the important things to keep co
 - the source URL or local file path
 - the normalized field names and category mapping
 
-## 4) Gamma exposure (GEX)
+## 5) Gamma exposure (GEX)
 
 The GEX transform estimates dealer gamma positioning from the collected
 options chain's Greeks. It reads `data/options_data.parquet` and writes
@@ -148,7 +231,7 @@ existing `delta`/`implied_volatility` snapshot fields) — if `gamma` is
 missing or entirely null, the transform stops with a clear error telling you
 to re-run the options collector first.
 
-## 5) FRED macroeconomic data
+## 6) FRED macroeconomic data
 
 The FRED collector pulls a curated set of series from the Federal Reserve
 Economic Data API and writes `data/fred_data.parquet`.
@@ -175,7 +258,7 @@ in the same way plan.md warns about for CPI/employment data. Building proper
 vintage tracking (via FRED's `realtime_start`/`realtime_end` parameters or the
 ALFRED API) is a real future improvement, not implemented here.
 
-## 6) SEC EDGAR filings
+## 7) SEC EDGAR filings
 
 The SEC collector looks up each configured equity ticker's CIK and pulls
 recent filing metadata, writing `data/sec_filings.parquet`.
@@ -205,7 +288,7 @@ resolve to a CIK and simply return no 10-K/10-Q/8-K matches, while several
 others (`IWM`, `EFA`, `EEM`, `TLT`, `SHV`, the sector SPDRs) aren't in SEC's
 ticker-to-CIK map at all and are skipped with a warning.
 
-## 7) Senate trading disclosures (historical only)
+## 8) Senate trading disclosures (historical only)
 
 The congress collector pulls from the community-maintained Senate Stock
 Watcher dataset and writes `data/congress_trades.parquet`.
@@ -230,7 +313,7 @@ research, not for monitoring current trades.
 not an exact figure — that's how the underlying disclosures work), `comment`,
 `senator`, `ptr_link`.
 
-## 8) Corporate insider transactions (Form 4)
+## 9) Corporate insider transactions (Form 4)
 
 The insider collector pulls recent SEC Form 4 filings for each `large_cap`
 ticker and writes `data/insider_trades.parquet`.
@@ -258,7 +341,7 @@ This collector makes multiple SEC requests per filing found (list filings,
 fetch its index, fetch its document) — expect a full run across all
 `large_cap` tickers to take noticeably longer than the other collectors.
 
-## 9) Institutional 13F holdings
+## 10) Institutional 13F holdings
 
 The institutional collector pulls the latest Form 13F holdings for a curated
 watchlist of well-known institutional investors and writes
@@ -286,7 +369,46 @@ collector parses.
 dollars, per SEC convention), `shrsOrPrnAmt` (shares or principal amount),
 `sshPrnamtType`, `investmentDiscretion`.
 
-## 10) What “unusual activity” means
+## 11) Futures 5-minute volume (volume-floor check)
+
+The futures volume collector supports a specific rule from
+`reference/orderflow_strategy_rules.yaml` — that a candle with fewer than
+20,000 contracts traded is low-participation and its signal should be
+discounted. Nothing else in this pipeline could check this: it needs
+5-minute volume on the relevant futures contract, and Alpaca (this
+pipeline's only other data provider) **has no futures data at all** —
+confirmed by inspecting `alpaca-py`'s available client classes, which cover
+only stocks, crypto, options, news, and corporate actions.
+
+### Data source — read this before relying on it
+This collector pulls from Yahoo Finance's public chart endpoint
+(`query1.finance.yahoo.com/v8/finance/chart/{symbol}`), the same one the
+`yfinance` package wraps. It is:
+- **Unofficial** — not a published, supported API; no SLA; could change or
+  start rate-limiting without notice
+- **Delayed** — confirmed live during development at roughly 10 minutes
+  behind real time, not true real-time
+- **Limited to ~60 days of intraday history** — this is a "check recent
+  participation" tool, not a historical dataset
+
+This is a real, accepted tradeoff, not an oversight: Alpaca simply doesn't
+offer an alternative, and this was the only free/keyless option found.
+
+### Default tickers
+`MNQ=F` (Micro E-mini Nasdaq-100, QQQ-linked), `MES=F` (Micro E-mini S&P
+500, SPY-linked), `SIL=F` (Micro Silver, SLV-linked) — configured under a
+new `futures` key in `tickers.yaml`, loaded via
+`market_data_pipeline.tickers.load_futures_tickers()`.
+
+### Output fields
+`symbol`, `timestamp`, `open`, `high`, `low`, `close`, `volume`, and
+`volume_floor_met` (`volume >= 20,000`, matching
+`min_volume_per_5min_candle_contracts` in
+`reference/orderflow_strategy_rules.yaml` exactly). The most recent bar
+returned by the API is always still forming (reported with `volume == 0`)
+and is dropped rather than reported as a false low-volume reading.
+
+## 12) What “unusual activity” means
 
 This project defines unusual activity as a contract or set of contracts showing unusually high volume relative to open interest.
 
@@ -313,7 +435,7 @@ If you want to evolve the definition later, you can adjust:
 - which metrics are included in the final output
 - additional logic such as comparing to a rolling average or prior days
 
-## 11) What the combined workbook does
+## 13) What the combined workbook does
 
 The combine step reads the local parquet files and writes a single Excel workbook named `market_data.xlsx`.
 
@@ -331,6 +453,10 @@ And adds these sheets when the corresponding parquet file exists:
 - `Congress Trades` — historical Senate trading disclosures (2012-2020 only)
 - `Insider Trades` — Form 4 non-derivative transactions
 - `13F Holdings` — latest institutional holdings for the curated watchlist
+- `Price 1H` / `Price 4H` — intraday OHLCV bars
+- `Swing Structure 1H` / `Swing Structure 4H` — per-symbol trend classification
+- `Volume Floor 5m` — large-cap 5-minute bars with the per-symbol volume-floor flag
+- `Futures Volume 5m` — 5-minute futures bars with the fixed volume-floor flag
 
 ### Why combine them
 This gives a single review file that can be opened in Excel without manual joins or additional work. It is designed for quick analysis and manual review.
@@ -338,11 +464,14 @@ This gives a single review file that can be opened in Excel without manual joins
 ### Why the unusual activity sheet is important
 The full options dataset can be large. The filtered unusual-activity sheet narrows the data to the rows most relevant for signs of fresh market positioning.
 
-## 12) Data frequency summary
+## 14) Data frequency summary
 
 | Dataset | Frequency | Notes |
 |---|---|---|
 | Price data | Daily bars | Configurable with `--days` |
+| Intraday price data | 1H/4H/5Min bars | `--timeframe`; separate files from the daily dataset |
+| Swing structure | Derived on-demand from intraday bars | Not a separate collection frequency of its own |
+| Equity volume-floor check | Derived on-demand from 5-minute bars | Per-symbol baseline, not a separate collection frequency |
 | Options snapshot | Daily collection pass | Uses moneyness and expiry filters |
 | COT positioning data | Weekly or report-based | Complementary positioning signal for metals markets |
 | GEX | Derived on-demand from the latest options snapshot | Not a separate collection frequency of its own |
@@ -351,15 +480,18 @@ The full options dataset can be large. The filtered unusual-activity sheet narro
 | Congress trades | Static historical snapshot | Source stops at Dec 2020, not updated |
 | Insider trades (Form 4) | Event-based | Reflects whatever is currently on EDGAR |
 | Institutional 13F holdings | Quarterly | Only the latest filing per manager is kept |
+| Futures 5-minute volume | On-demand, ~10min delayed | Unofficial source, ~60-day intraday history limit |
 | Combined workbook | On-demand after collection | Produces a review-friendly Excel file |
 
-## 13) How this should evolve
+## 15) How this should evolve
 
 This project is intentionally designed so these definitions can be changed without rewriting the whole pipeline.
 
 If the logic changes later, the places most likely to be updated are:
 - `tickers.yaml` for the symbol universe
-- `market_data_pipeline/collectors/price.py` for price data frequency and fields
+- `market_data_pipeline/collectors/price.py` for price data frequency, timeframe choices, and fields
+- `market_data_pipeline/transforms/swing_structure.py` for the swing-point window and classification logic
+- `market_data_pipeline/transforms/volume_floor.py` for the baseline window and multiplier
 - `market_data_pipeline/collectors/options.py` for contract filtering and unusual activity logic
 - `market_data_pipeline/collectors/cot.py` for positioning category detection and derived metrics
 - `market_data_pipeline/transforms/gex.py` for the gamma exposure formula and regime thresholds
@@ -368,6 +500,7 @@ If the logic changes later, the places most likely to be updated are:
 - `market_data_pipeline/collectors/congress.py` for the congressional data source (currently historical-only)
 - `market_data_pipeline/collectors/insider.py` for Form 4 parsing scope (currently non-derivative only)
 - `market_data_pipeline/collectors/institutional.py` for the 13F watchlist
+- `market_data_pipeline/collectors/futures_volume.py` for the futures ticker list and volume-floor threshold
 - `market_data_pipeline/combine.py` for workbook structure and sheet output
 
 The goal is to keep the business definitions clear and explicit, so future data collection changes are easy to reason about.
