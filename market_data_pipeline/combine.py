@@ -27,6 +27,13 @@ OPTIONAL_SHEETS = {
     "swing_4h": ("swing_structure_4h.parquet", "Swing Structure 4H"),
     "futures_volume": ("futures_volume_5m.parquet", "Futures Volume 5m"),
     "volume_floor": ("volume_floor_5m.parquet", "Volume Floor 5m"),
+    "fundamentals": ("fundamentals_data.parquet", "Fundamentals"),
+    "fundamentals_ratios": ("fundamentals_ratios.parquet", "Fundamentals Ratios"),
+    "momentum": ("momentum.parquet", "Momentum"),
+    "perps": ("perps_data.parquet", "Perps Data"),
+    "deribit_options": ("deribit_options.parquet", "Deribit Options"),
+    "gex_crypto": ("gex_crypto.parquet", "GEX Crypto"),
+    "news": ("news_data.parquet", "News Data"),
 }
 
 

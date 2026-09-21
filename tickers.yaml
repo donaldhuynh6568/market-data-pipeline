@@ -6,31 +6,43 @@
 # crypto: Alpaca crypto pairs, format SYMBOL/USD
 # futures: Yahoo Finance continuous-contract tickers (format SYMBOL=F) — Alpaca has
 # no futures data at all, so these are collected from a separate free source
+# cash_like: near-zero-volatility ETFs (e.g. SHV) that are excluded from the momentum rank,
+# since a tiny volatility denominator inflates their score
 
 equities:
   broad_market:
     - SPY
     - QQQ
     - IWM
+    - XLU
+    - SMH
   large_cap:
     - AAPL
     - MSFT
     - NVDA
+    - AMD
     - AMZN
     - GOOGL
     - META
+    - UBER
+    - MU
+    - SNDK
+    - PANW
+    - COST
     - TSLA
     - FICO
     - JPM
     - V
     - UNH
     - PG
-    - MA
-    - HD
     - SPCX
     - AVGO
     - LLY
     - ASML
+    - NRG
+    - CEG
+    - VST
+    - GEV
   defensive:
     - TLT
     - SHV
@@ -47,8 +59,12 @@ equities:
 crypto:
   - BTC/USD
   - ETH/USD
+  - SOL/USD
 
 futures:
   - MNQ=F  # Micro E-mini Nasdaq-100 (QQQ-linked)
   - MES=F  # Micro E-mini S&P 500 (SPY-linked)
   - SIL=F  # Micro Silver (SLV-linked)
+
+cash_like:
+  - SHV

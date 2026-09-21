@@ -168,7 +168,9 @@ CFTC reports break positions into categories such as:
 This is valuable because `Managed Money` is much closer to the question of "what are large speculators doing?" than a simple ETF put/call ratio.
 
 ### Expected output
-The collector normalizes the raw source into a consistent table and filters for relevant metals names such as `Gold` and `Silver`.
+The collector normalizes the raw source into a consistent table and filters for relevant metals names such as `Gold` and `Silver`, plus crypto futures: CME `BITCOIN` and `ETHER CASH SETTLED`, and Coinbase Derivatives `NANO SOLANA` (the only CFTC-reportable SOL futures; small, so weaker as a positioning signal). Micro/Nano/perp-style variants of BTC/ETH are deliberately excluded.
+
+Crypto markets appear in the CFTC **Legacy** report (Socrata dataset `6dca-aqww`), not the Disaggregated one, so their spec category is `noncommercial` rather than `managed_money`. Pass `--source-url` twice to combine both reports in one run.
 
 ### Derived positioning metrics
 The collector adds large-speculator positioning fields on top of the raw report:
@@ -464,7 +466,59 @@ This gives a single review file that can be opened in Excel without manual joins
 ### Why the unusual activity sheet is important
 The full options dataset can be large. The filtered unusual-activity sheet narrows the data to the rows most relevant for signs of fresh market positioning.
 
-## 14) Data frequency summary
+## 14) Fundamentals / cash-flow data (SEC XBRL)
+
+The fundamentals collector looks up each `large_cap` ticker's CIK and pulls
+SEC's XBRL companyfacts API, writing `data/fundamentals_data.parquet`. A
+transform (`market_data_pipeline/transforms/fundamentals_ratios.py`) then
+derives ratios into `data/fundamentals_ratios.parquet`.
+
+### Frequency
+Event-based, like SEC filings: companyfacts always reflects the latest
+10-K/10-Q filed for a company, with no fixed collection schedule of its own.
+
+### Scope
+`large_cap` only — the same reasoning as the SEC filings ticker universe
+caveat above (§7): fundamentals ratios aren't meaningful for the ETF
+categories in `tickers.yaml`.
+
+### Output fields (`fundamentals_data.parquet`)
+`ticker`, `cik`, `fiscal_period_end`, `form`, `revenue`, `net_income`,
+`operating_income`, `interest_expense`, `depreciation_amortization`, `ocf`
+(operating cash flow), `capex`, `cash`, `total_debt`, `shares_outstanding`,
+plus a `*_tag_used` column per metric recording which XBRL tag was actually
+matched.
+
+### Output fields (`fundamentals_ratios.parquet`)
+`ticker`, `fiscal_period_end`, `fcf` (OCF − CapEx), `fcf_margin`,
+`cash_conversion_ratio` (OCF / net income — a quality-of-earnings check),
+`capex_pct_revenue` and its trailing trend, `net_debt` (total debt − cash),
+`net_debt_to_ebitda`, `interest_coverage` (operating income / interest
+expense).
+
+### Known limitation: XBRL tag inconsistency across filers
+Different companies tag economically identical concepts under different XBRL
+tags (e.g. `Revenues` vs. `RevenueFromContractWithCustomerExcludingAssessedTax`),
+and companyfacts includes duplicate/overlapping period entries (a 10-Q can
+report both quarterly and year-to-date cumulative cash-flow figures under the
+same tag, and restatements happen). The collector uses a per-metric
+tag-fallback list (see `TAG_FALLBACKS` in
+`market_data_pipeline/collectors/fundamentals.py`) and prefers the
+most-recently-filed entry for a duplicated period, recording which tag was
+used per metric rather than silently guessing. EBIT/EBITDA are never
+standard XBRL tags anywhere — they're always derived from
+`OperatingIncomeLoss` (+ D&A for EBITDA), never looked up directly.
+
+### Not yet implemented
+Forward guidance and analyst consensus estimates are not present in XBRL and
+are not collected here — see `intent/feature-fundamentals-collector.md` for
+the planned (not yet built) follow-up phase, which would need a separate
+third-party provider and a new API key. Valuation ratios that need market cap
+(P/E, EV/EBITDA, EV/FCF, FCF yield) are also not yet built, though they only
+need `shares_outstanding` from this dataset times price already in
+`price_data.parquet` — no new provider required.
+
+## 15) Data frequency summary
 
 | Dataset | Frequency | Notes |
 |---|---|---|
@@ -481,14 +535,72 @@ The full options dataset can be large. The filtered unusual-activity sheet narro
 | Insider trades (Form 4) | Event-based | Reflects whatever is currently on EDGAR |
 | Institutional 13F holdings | Quarterly | Only the latest filing per manager is kept |
 | Futures 5-minute volume | On-demand, ~10min delayed | Unofficial source, ~60-day intraday history limit |
+| Fundamentals / cash-flow (SEC XBRL) | Event-based | Reflects latest 10-K/10-Q filed; ratios derived on-demand |
 | Combined workbook | On-demand after collection | Produces a review-friendly Excel file |
 
-## 15) How this should evolve
+## 17) Momentum ranking
+
+`market_data_pipeline/transforms/momentum.py` reads `price_data.parquet` and writes `momentum.parquet` (sheet `Momentum`), one row per symbol, ranked best first by `score`.
+
+### Score and delta (the ranking signal)
+Defined in the Methodology sheet of `reference/Rotation_Positions_Tracker.xlsx`:
+
+- `momentum_10d_pct` = (close today / close 10 bars ago - 1) x 100
+- `vol_10d_pct` = standard deviation of the last 10 daily returns x sqrt(periods per year) x 100. Simple returns, population standard deviation (ddof=0); 252 periods for equities, **365 for crypto** (crypto trades every day, so this differs slightly from a flat-252 calculation).
+- `score` = `momentum_10d_pct` / `vol_10d_pct`, with volatility floored at 5% so near-constant prices can't blow the score up.
+- `delta_5d` / `delta_10d` / `delta_20d` = today's score minus the score 5 / 10 / 20 bars ago.
+- `delta_signal`: `ACCELERATING` (all three deltas positive), `DECELERATING` (all three negative), `MIXED`, or `UNKNOWN` (not enough history; needs about 31 bars).
+
+Read the deltas before the score: a high score with negative deltas is a name that is already fading. Names in the `cash_like` list in `tickers.yaml` (currently `SHV`) keep their metrics but get no `rank` and are flagged `cash_like`, because their near-zero volatility inflates the score.
+
+### Other columns (secondary, from reference/rotationstrategy.md)
+- `ret_5d` / `ret_20d` / `ret_60d`: simple close-to-close returns over that many bars (trading days for equities, calendar days for crypto).
+- `smoothed_ret_*`: the same windows on an EMA (span 5) of the median price `(high+low)/2`.
+- `acceleration_20d`: latest 20-bar smoothed return minus the 20-bar return before it.
+- `ann_vol` and `vol_adj_score`: 60-bar log-return volatility and the 60-bar smoothed return divided by it. No longer used for ranking.
+- `above_200d_ma`: trend flag, only populated with at least 200 bars.
+
+Fields are NaN when there is not enough history; collect with `--days 90` (or more) for the 60-bar metrics and about 300 days for the 200-day flag. `--as-of YYYY-MM-DD` recomputes as of an earlier date.
+
+## 18) Crypto perpetual funding rates and open interest
+
+`market_data_pipeline/collectors/perps.py` writes `perps_data.parquet` (sheet `Perps Data`) with `symbol`, `venue`, `timestamp`, `funding_rate`, `open_interest` (in base coin), `mark_price` and `open_interest_usd`. Venues: Binance and Hyperliquid by default, Bybit optional (`--venues`). Binance and Bybit are geo-blocked in some regions (including the US); a failing venue is skipped, not fatal. Funding rates are the venue's current per-interval rate, not annualized, and intervals can differ by venue. This is a point-in-time snapshot, so history builds only if you run it repeatedly.
+
+## 19) Crypto options and GEX (Deribit)
+
+`market_data_pipeline/collectors/deribit_options.py` pulls the public Deribit option book for BTC and ETH (SOL is selectable but Deribit may not list options for it), filtered by moneyness and expiry like the equity options collector. It writes `deribit_options.parquet` and, through the existing `compute_gex`, `gex_crypto.parquet`.
+
+Differences from equity GEX: Deribit's book summary has no Greeks, so gamma is derived from mark IV with Black-Scholes (zero rate); the contract multiplier is 1 coin rather than 100 (carried in a `contract_multiplier` column, which `compute_contract_gex` honors when present); and the same dealer-positioning assumption applies (long calls / short puts), which is an estimate for crypto too.
+
+## 21) Confluence report
+
+`market_data_pipeline/reports/confluence_report.py` builds `data/Confluence_Report_<date>.xlsx` from the parquet files already in `data/`. It never runs a collector or transform: refresh the parquets separately, then run the report. Required files: `momentum`, `gex_data`, `options_data`, `swing_structure_1h`, `swing_structure_4h` (a missing one exits with the command that produces it). Optional: `gex_crypto`, `deribit_options`, `perps_data`, `insider_trades`, `cot_data`, `news_data` (missing ones are listed under Known Gaps). Every threshold lives in `confluence_report_rules.yaml`.
+
+Tabs: `Summary & Ratings`, `Momentum & Delta` (full ranked universe, cash-like excluded), `Resistance Ladder Detail`, `Methodology` (rules plus a generated Known Gaps list).
+
+- **Names shown:** the `focus` list in the rules file plus every ACCELERATING name.
+- **Rating (first match wins):** DECELERATING = SELL / AVOID; no GEX = HOLD (data gap); MIXED = HOLD; ACCELERATING with NEGATIVE_GAMMA/NEAR_FLIP or a 4H DOWNTREND = HOLD; ACCELERATING + 4H SIDEWAYS + spot within 1% of the call wall = WATCH; otherwise ACCELERATING = BUY. Missing momentum history or 4H structure = `HOLD (unclassified, review manually)`.
+- **Primary target:** the reported call wall while it is above spot; once cleared, the strike with the most total call open interest between 1% and 12% above spot. Stretch target: the biggest cluster from 12% to 20% above spot, shown only if its OI is at least 75% of the primary's. SELL names and names without GEX carry no target. This is an open-interest proxy, not a re-run gamma calculation.
+- **Notes:** built from templates keyed on the rating reason, so the same inputs give the same text. Crypto notes add perp funding; a name gets an insider-selling flag when it has at least 20 open-market sells by at least 3 insiders in the last 90 days (Form 4 data lags, so this uses the newest data available).
+- **Optional LLM notes:** `--llm-notes` (needs `uv run --with anthropic ...` and Anthropic credentials) asks Claude to rewrite only the Note column. Ratings and targets are never touched, a rewrite that drops any number from the rule-based note is discarded, and the rule-based note stays in an extra column. Not reproducible run to run.
+- **Vintages:** the header shows the momentum (price close) and GEX/options dates and warns when they differ.
+
+## 22) News data
+
+`market_data_pipeline/collectors/news.py` writes `data/news_data.parquet` (sheet `News Data`) from Alpaca's news API, which serves Benzinga articles for equities and crypto pairs with the same credentials as the price collector. It is a headline feed for context, not a signal: no article bodies are stored.
+
+- **Which tickers:** `--symbols` if given, otherwise the same picks the confluence report shows (focus list plus ACCELERATING names, via `market_data_pipeline/picks.py`).
+- **Rows:** one per (article, requested ticker), so a multi-ticker article appears once for each pick it was fetched for. Fields: `id, ticker, headline, summary, source, url, author, created_at, updated_at, tagged_symbols, n_tagged, relevance`. Times are UTC. Text is cleaned (HTML entities unescaped, replacement characters dropped).
+- **Relevance:** `HIGH` when the headline names the ticker, a built-in crypto name (Bitcoin, Ethereum/Ether, Solana) or a company name from `news.aliases` in `confluence_report_rules.yaml`; `MEDIUM` when the article is tagged to the ticker and to at most `news.max_tagged_for_high` (3) symbols; `LOW` otherwise (multi-ticker roundups). The feed has no company names for equities, so a pick with no alias is only HIGH when its ticker appears in the headline. Relevance is fixed when an article is fetched, so after changing aliases, re-run the collector.
+- **Storage:** each run appends to the file and keeps one row per (id, ticker), preferring the latest `updated_at`; rows older than `--keep-days` (90) are pruned. `--days` (7) and `--limit` (50 per ticker; alpaca-py pages internally) control each fetch. Newest coverage is uneven: quiet weekends and less-followed names return few articles.
+- **In the confluence report:** a `News` column shows up to 3 headlines from the last 7 days before the newest article (headlines naming the asset first, then MEDIUM ones), and the header shows how far the news goes. When a BUY/WATCH has a headline that names the asset and matches a negative keyword (or a SELL / AVOID has one matching a positive keyword) the cell starts with `REVIEW NEWS: ...`. The keyword lists are in the rules file. This is a keyword screen, not sentiment analysis, and ratings and targets never change.
+
+## 23) How this should evolve
 
 This project is intentionally designed so these definitions can be changed without rewriting the whole pipeline.
 
 If the logic changes later, the places most likely to be updated are:
-- `tickers.yaml` for the symbol universe
+- `tickers.yaml` for the symbol universe (and the `cash_like` list excluded from the momentum rank)
 - `market_data_pipeline/collectors/price.py` for price data frequency, timeframe choices, and fields
 - `market_data_pipeline/transforms/swing_structure.py` for the swing-point window and classification logic
 - `market_data_pipeline/transforms/volume_floor.py` for the baseline window and multiplier
@@ -501,6 +613,13 @@ If the logic changes later, the places most likely to be updated are:
 - `market_data_pipeline/collectors/insider.py` for Form 4 parsing scope (currently non-derivative only)
 - `market_data_pipeline/collectors/institutional.py` for the 13F watchlist
 - `market_data_pipeline/collectors/futures_volume.py` for the futures ticker list and volume-floor threshold
+- `market_data_pipeline/collectors/fundamentals.py` for the XBRL tag-fallback table and fiscal-period parsing
+- `market_data_pipeline/transforms/fundamentals_ratios.py` for the ratio formulas and CapEx trend window
+- `market_data_pipeline/transforms/momentum.py` for the score/delta definition, vol floor, momentum windows, and smoothing span
+- `market_data_pipeline/collectors/perps.py` for perp venues and symbol mapping
+- `market_data_pipeline/collectors/deribit_options.py` for crypto option filtering and the Deribit-to-GEX mapping
+- `confluence_report_rules.yaml` and `market_data_pipeline/reports/` for the confluence report's rating rules, target selection, note templates, insider flag and news keywords
+- `market_data_pipeline/collectors/news.py` for news relevance rules; `market_data_pipeline/picks.py` for how the picks list is built
 - `market_data_pipeline/combine.py` for workbook structure and sheet output
 
 The goal is to keep the business definitions clear and explicit, so future data collection changes are easy to reason about.

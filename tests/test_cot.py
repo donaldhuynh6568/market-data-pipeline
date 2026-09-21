@@ -133,3 +133,39 @@ def test_add_release_date_is_three_days_after_observation():
 
     assert result["observation_date"].iloc[0] == pd.Timestamp("2026-08-04")
     assert result["release_date"].iloc[0] == pd.Timestamp("2026-08-07")  # the following Friday
+
+
+def test_filter_target_commodities_matches_crypto_but_not_micro_variants():
+    df = pd.DataFrame({
+        "market_and_exchange_names": [
+            "BITCOIN - CHICAGO MERCANTILE EXCHANGE",
+            "MICRO BITCOIN - CHICAGO MERCANTILE EXCHANGE",
+            "ETHER CASH SETTLED - CHICAGO MERCANTILE EXCHANGE",
+            "NANO SOLANA - COINBASE DERIVATIVES, LLC",
+            "NANO SOLANA PERP STYLE - COINBASE DERIVATIVES, LLC",
+            "CRUDE OIL - NEW YORK MERCANTILE EXCHANGE",
+        ],
+        "commodity_name": ["BITCOIN", "BITCOIN", "ETHER", "SOLANA", "SOLANA", "CRUDE OIL"],
+    })
+
+    filtered = filter_target_commodities(df)
+
+    assert filtered["market_and_exchange_names"].tolist() == [
+        "BITCOIN - CHICAGO MERCANTILE EXCHANGE",
+        "ETHER CASH SETTLED - CHICAGO MERCANTILE EXCHANGE",
+        "NANO SOLANA - COINBASE DERIVATIVES, LLC",
+    ]
+
+
+def test_positioning_metrics_use_api_json_noncomm_field_names():
+    df = pd.DataFrame({
+        "market_and_exchange_names": ["BITCOIN - CHICAGO MERCANTILE EXCHANGE"] * 2,
+        "report_date_as_yyyy_mm_dd": ["2026-09-08T00:00:00.000", "2026-09-15T00:00:00.000"],
+        "noncomm_positions_long_all": [100, 150],
+        "noncomm_positions_short_all": [40, 50],
+    })
+
+    result = add_positioning_metrics(df)
+
+    assert result["spec_net"].tolist() == [60, 100]
+    assert result["spec_net_change_1w"].iloc[1] == 40

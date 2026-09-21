@@ -1,0 +1,194 @@
+# Machine-readable companion to location_confluence_playbook.md.
+# Concrete thresholds/definitions only, see the playbook for full
+# explanation and source context. Nothing here is coded yet; this is the
+# rules layer for a future transforms/location.py.
+# Section 0 of the playbook is the compressed walkthrough; this file
+# mirrors it as structured fields for eventual code use.
+
+source:
+  origin: "four livestream transcripts: (1) discretionary trader, suspension-block/quadrant/FVG framework, not ICT proper but overlapping vocabulary; (2)-(4) ICT-proper vocabulary (sessions, kill zones, displacement, PD arrays, dealing range/OTE)"
+  status: not_built
+  blocking_note: "mirrors location.status: not_built in orderflow_strategy_rules.yaml"
+  core_purpose: "map untested liquidity before a session starts (time first), require displacement to confirm price is moving to claim it (price second), build bias in advance rather than reacting"
+
+quick_reference_walkthrough:
+  # mirrors playbook section 0 - the minimum sequence to get a stop and target
+  three_tools: ["liquidity (where price draws to)", "risk framing (where the stop goes)", "one entry mechanism (how entry is timed)"]
+  steps:
+    - "define the dealing range (high/low bounding the move of interest)"
+    - "classify recent highs/lows inside it as smooth (untested) or jagged (already swept)"
+    - "apply decision_hierarchy to find which level to grade"
+    - "require displacement before treating a gap as a real FVG"
+    - "entry = FVG near edge, not a deeper CE fill"
+    - "stop = candle 1 low (bullish) / high (bearish)"
+    - "target = OTE (75% of dealing range) as primary; CE (50%) as conservative interim; full extreme as stretch only"
+    - "commit to one entry mechanism per setup; do not model-hop mid-session"
+
+definitions:
+  dealing_range:
+    rule: "the high and low bounding the price action being analyzed: a recent swing high/low, a session range, or a suspension block"
+    generalizes: "suspension_block and session_range are specific cases of this"
+  ote_three_quarter_rule:
+    rule: "3/4 of the dealing range (measured from the range's origin toward its target side) is the higher-confidence completion reference for a directional move"
+    distinct_from: "CE (50%), which is the conservative/first target, not the completion reference"
+    note: "a move can complete at 3/4 of the range and never revisit the original consolidation"
+  volume_imbalance:
+    rule: "candle N body close vs candle N+1 body open, body-to-body gap"
+  fair_value_gap:
+    rule: "3-candle imbalance: candle 1 wick vs candle 3 wick, candle 2 range does not overlap"
+    candle_roles: {1: "pre-imbalance candle", 2: "imbalance candle", 3: "closes and frames the imbalance"}
+  common_gap_vs_fvg:
+    rule: "a gap only counts as a tradable FVG/PD array if it shows displacement; a slow low-conviction gap with no directional force is a common gap and excluded"
+    displacement_definition: "fast directional run through a prior high/low, ideally at a structurally meaningful time (kill-zone open)"
+  fvg_entry_stop_mechanics:
+    entry: "FVG's near edge; do not wait for a deeper fill at CE or beyond, price may tag the edge and run"
+    stop_bullish: "candle 1's low"
+    stop_bearish: "candle 1's high"
+    note: "stop is the pre-imbalance candle's extreme, not the FVG's own boundary"
+  decision_hierarchy:
+    rule: "mutually exclusive 3-way choice per position/range, not a checklist requiring all to agree"
+    steps:
+      - "given higher-timeframe bias, check what recently happened: sell-side stop hunt, buy-side stop hunt, or neither"
+      - "locate first imbalance in the return leg from that hunt"
+      - "classify the far level it is heading toward: single high/low, or relative-equal high/low (apply anchor-point + wick grading if it has a wick)"
+    confluence_note: "one clean setup (bias + displacement + graded level) is sufficient; order blocks, model 2022, COT, seasonality do not all need to agree simultaneously"
+  gaps_as_magnets:
+    rule: "FVGs and opening-range gaps (RTH, new-day, new-week) tend to get revisited even after price moves away for a while; treat unfilled gaps as standing reference levels, not one-time targets that expire"
+  one_model_at_a_time:
+    rule: "pick a single entry mechanism per setup and wait for it; if it does not fire, do nothing rather than switching models mid-session"
+  suspension_block:
+    rule: "daily range bounded by two volume imbalances, one at range high, one at range low"
+  quadrant_grading:
+    rule: "any range (swing range, single candle wick, session range, or dealing range) divided into quarters"
+    levels: [high, upper_quadrant, midpoint_CE, lower_quadrant, low]
+    ce_definition: "midpoint of the graded range, called consequent encouragement / consequent encroachment"
+    applies_to: ["swing_range", "single_candle_wick", "session_range", "dealing_range"]
+  relative_equal_highs_lows:
+    rule: "two highs (or two lows) close to equal, one slightly beyond the other"
+    anchor_point: "the higher of the two highs (or the lower of the two lows) is the real target"
+    wick_grading_refinement: "if the anchor candle has a wick, grade the wick into quadrants; price may only reach CE or lower quadrant before reversing, not the full level"
+    weakness_signal: "failing to reach CE on approach indicates the move is exhausted"
+    read_as: "resting liquidity pool, high-probability sweep target"
+  session_vs_kill_zone:
+    session_windows_et:
+      asia: "19:00 - 05:00"
+      london: "02:00 - 11:00"
+      new_york: "09:30 - 16:00"
+    kill_zone_windows_et:
+      london_kill_zone: "02:00 - 05:00"
+      ny_premarket_kill_zone: "07:00 - 09:00"
+      ny_open_kill_zone: "09:30 - 10:00"
+    additional_reset_time_et: "08:30 (common economic-release time; behaves as a reset point whether or not news is scheduled that day)"
+    rule: "scan the full session range for smooth highs/lows, not just the kill zone; kill zone is for timing entries, not limiting the liquidity search"
+  smooth_vs_jagged:
+    rule: "untested high/low with no repeated wicking through = smooth = highest-probability draw; once run through and reacted off, becomes jagged and stops being a target"
+  turtle_soup:
+    rule: "short-term high forms, marginally higher high fails to hold, pulls back into range"
+    note: "does not require a full trend reversal, only failed-breakout character"
+  model_2022:
+    rule: "FVG forms on right side of a swing high, fractal across timeframes"
+  order_block:
+    rule: "last down-close candle before reversal through a swept relative-equal high/low"
+    confirmation: "price returns to order block CE before continuing in sweep direction"
+    validation: "require close beyond swept level, not just a wick through it"
+
+confluence_rules:
+  time_first_then_price:
+    rule: "define dealing range/session and scan full extent for smooth highs/lows before considering lower timeframe; confirm with displacement before treating as tradable bias"
+  displacement_required:
+    rule: "require fast directional break of prior high/low before treating a gap as a real FVG"
+  fvg_side_preference:
+    rule: "when swing high has FVG on both left(buy) and right(sell) side, prefer left/buy-side FVG as target"
+    reason: "acts as inversion FVG once price rotates lower through it"
+    tradeoff: "a smaller FVG below may fill first; buy-side target may never be hit"
+  first_fvg_after_turtle_soup:
+    rule: "first FVG forming after turtle-soup rejection is carried forward as a reference level, not discarded after one use"
+  suspension_block_containment:
+    rule: "while price is inside a suspension block or dealing range, expect repeated tests of both boundaries rather than clean trend"
+    use: "range's own quadrant grading (CE, upper/lower quadrant, OTE at 3/4) for expected turning points"
+  order_block_confidence:
+    higher_confidence_when: "far-side relative-equal level only slightly beyond near side (not an obvious/clean equal high-low)"
+  anchor_point_wick_grading:
+    rule: "before assuming a relative-equal high/low fully sweeps, grade the anchor candle's wick; treat CE as the minimum bar for strength"
+  enter_at_edge:
+    rule: "take FVG near edge as entry, not a limit order at CE waiting for a better fill"
+  stop_at_candle_1:
+    rule: "initial stop is pre-imbalance candle's extreme (low for bullish, high for bearish)"
+  target_ote_not_just_ce:
+    rule: "treat 3/4 of the dealing range (OTE) as the primary completion reference; CE is a conservative interim target to partial into, not the finish line"
+  one_model_at_a_time:
+    rule: "commit to a single entry mechanism per setup; do not require every PD array to agree or switch models mid-session"
+
+opening_range_half_gap:
+  status: not_built
+  blocking_gap: "no RTH open print; collectors/price.py only pulls TimeFrame.Day"
+  rule:
+    definition: "previous session settlement vs today's 9:30 ET open"
+    grading: "quarter, half (CE), three-quarter (OTE), full closure - same quadrant logic as any dealing range"
+    target: "50% of RTH opening gap (its CE) is the conservative first target, not full gap fill"
+    stated_hit_rate_pct: 70
+    stated_hit_window: "by 10:00 NY"
+    override: "if higher-timeframe daily read favors a direction, that bias can override the 10:00 time cutoff and the half-gap may not be revisited at all"
+    abandon_signal: "a close outside the gap that keeps running is the signal to abandon the gap-closure idea for the session"
+
+trade_management:
+  status: documented_not_automatable
+  partial_taking:
+    rule: "take partial when trade has run straight toward target and is close to it"
+  stop_trailing:
+    rule: "ratchet stop on every new swing low/high in trade's favor, never leave stop at stale level, never jam straight to breakeven to relieve discomfort"
+    increment_note: "transcript uses roughly 3 handles at a time on that instrument; not a literal dollar rule to copy across instruments"
+    conservatism: "trail tighter when PD arrays are stacked close together; can be more liberal in calmer conditions"
+  position_sizing_gate:
+    rule: "before sizing a trade, ask if a full loss on it would make the next trade harder to take; if yes, it is oversized"
+    purpose: "determines whether stop-outs stay routine cost-of-business or start causing rule deviation"
+
+rotation_application:
+  status: candidate_overlay_not_signal_generator
+  rule: "apply daily-timeframe version of smooth/jagged + relative-equal-highs-lows + quadrant-CE/OTE logic to a name already selected by momentum ranking"
+  use: "time entry into discount half of recent daily dealing range; place stop below graded low instead of fixed-percent stop; target OTE (75%) as primary reference"
+  excluded: "session/kill-zone intraday timing does not transfer to monthly rebalance; stays scoped to intraday order-flow strategy"
+
+daily_stop_target_workflow:
+  status: manual_today_blocked_on_position_tracking
+  trigger: "each market_data.xlsx refresh"
+  steps:
+    - "pull ~20 trading days of daily OHLC for each open position ticker"
+    - "define the dealing range (recent swing high/low relevant to position direction)"
+    - "classify recent highs/lows as smooth or jagged"
+    - "apply decision_hierarchy to find the level to grade"
+    - "locate first FVG with displacement in the return leg"
+    - "stop = candle 1 low/high of that FVG per position direction"
+    - "target = CE (50%) as conservative first target; OTE (75%) as primary completion reference; far extreme as stretch target only"
+    - "if inside a suspension block, use block's own quadrant grading instead of single stop/target"
+  blocking_gap: "execution.status: not_built in orderflow_strategy_rules.yaml; no position tracking exists, open position list (ticker, direction, entry price) must be supplied manually each refresh until a Positions sheet exists"
+  scope_note: "produces stop/target for positions already selected by momentum ranking; does not feed back into or replace the ranking"
+
+status_summary:
+  daily_bar_computable_not_built:
+    - volume_imbalance
+    - fair_value_gap
+    - common_gap_vs_fvg_displacement_filter
+    - fvg_entry_stop_mechanics
+    - decision_hierarchy
+    - dealing_range
+    - ote_three_quarter_rule
+    - suspension_block
+    - quadrant_grading
+    - relative_equal_highs_lows
+    - anchor_point_wick_grading
+    - smooth_vs_jagged
+    - turtle_soup
+    - model_2022
+    - order_block
+    - gaps_as_magnets
+  intraday_blocked_not_built:
+    - opening_range_half_gap
+    - session_vs_kill_zone_timing
+    - swing_structure_1h_4h
+  discretionary_not_automatable:
+    - trade_management
+    - position_sizing_gate
+    - one_model_at_a_time
+  manual_blocked_on_position_tracking:
+    - daily_stop_target_workflow

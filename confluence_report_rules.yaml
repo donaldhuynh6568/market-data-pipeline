@@ -1,0 +1,67 @@
+# Tunable rules for the confluence report (market_data_pipeline/reports/confluence_report.py).
+# Every threshold the report uses lives here so it can be changed without touching code.
+# The report only READS the parquet files in data/; refresh them separately with the collectors.
+
+# Names always shown on the Summary tab. Every ACCELERATING name is added on top (include_accelerating).
+focus:
+  - META
+  - AAPL
+  - GOOGL
+  - AVGO
+  - BTC/USD
+  - ETH/USD
+  - SOL/USD
+  - XLE
+include_accelerating: true
+
+rating:
+  # ACCELERATING + 4H SIDEWAYS + spot within this fraction of the call wall = WATCH (a live, unresolved test)
+  near_wall_threshold: 0.01
+  # A regime in this list stops an ACCELERATING name from rating BUY (it rates HOLD instead)
+  buy_blocked_regimes: [NEGATIVE_GAMMA, NEAR_FLIP]
+
+targets:
+  # Primary target = the reported call wall while it is above spot; once the wall is cleared, the strike with the
+  # most call open interest between min_distance and near_band above spot. Stretch = most OI in (near_band, far_band].
+  min_distance: 0.01
+  near_band: 0.12
+  far_band: 0.20
+  ladder_rows: 6
+  # Only show a stretch target when its call OI is at least this fraction of the primary target's
+  stretch_min_oi_ratio: 0.75
+
+insider:
+  # Flag a name when open-market sells (code S, disposed) in the window reach both thresholds
+  window_days: 90
+  min_sells: 20
+  min_owners: 3
+
+staleness:
+  # Warn when a price/options layer is older than the newest layer by more than this many days
+  stale_after_days: 3
+
+news:
+  # Collector: relevance is HIGH when the headline names the ticker/alias, MEDIUM when the article is tagged to it and
+  # to at most this many symbols, otherwise LOW (multi-ticker roundups). The report shows HIGH first, then MEDIUM.
+  max_tagged_for_high: 3
+  # Company names that count as naming a ticker in a headline (the feed has no company names for equities).
+  # Add an entry for any pick you want matched by name; crypto (BTC/ETH/SOL) names are built in.
+  aliases:
+    AVGO: [Broadcom]
+    AMD: [Advanced Micro Devices]
+    PANW: [Palo Alto Networks]
+    META: [Meta Platforms, Facebook, Zuckerberg]
+    GOOGL: [Alphabet, Google]
+    AAPL: [Apple]
+    NVDA: [Nvidia]
+    MSFT: [Microsoft]
+    XLE: [Energy Select Sector]
+    SMH: [VanEck Semiconductor]
+  # Report: newest headlines (HIGH before MEDIUM) within this many days of the newest article, up to headlines_per_name
+  lookback_days: 7
+  headlines_per_name: 3
+  max_headline_chars: 140
+  # Keyword screen (prefix match at a word boundary). BUY/WATCH + a negative hit, or SELL + a positive hit, adds a
+  # "REVIEW NEWS" flag (only headlines naming the asset count); ratings never change. This is a screen, not sentiment analysis.
+  negative_keywords: [downgrade, probe, investigation, lawsuit, sued, recall, plunge, slump, subpoena, fraud, layoff, misses, cuts guidance, lowers guidance, guidance cut, warning]
+  positive_keywords: [upgrade, beats, raises guidance, raised guidance, price target raised, surge]

@@ -51,3 +51,14 @@ def test_load_futures_tickers_returns_empty_when_missing(tmp_path):
     path.write_text(yaml.dump({"equities": {}}), encoding="utf-8")
 
     assert load_futures_tickers(path) == []
+
+
+def test_load_cash_like_tickers(tmp_path):
+    from market_data_pipeline.tickers import load_cash_like_tickers
+
+    path = tmp_path / "tickers.yaml"
+    path.write_text(yaml.safe_dump({"equities": {}, "cash_like": ["SHV"]}), encoding="utf-8")
+
+    assert load_cash_like_tickers(path) == ["SHV"]
+    path.write_text(yaml.safe_dump({"equities": {}}), encoding="utf-8")
+    assert load_cash_like_tickers(path) == []

@@ -39,27 +39,54 @@ def normalize_cot_columns(df: pd.DataFrame) -> pd.DataFrame:
     return renamed
 
 
+# Metals match on substring. Crypto targets are "^"-anchored against market_and_exchange_names so the
+# standard CME contracts don't also pull in the Micro/Nano/perp-style variants (different contract sizes).
+# SOL has no CME contract; its only CFTC-reportable futures are Coinbase Derivatives' Nano Solana.
+DEFAULT_TARGETS = [
+    "gold",
+    "silver",
+    "gld",
+    "slv",
+    "^bitcoin - chicago mercantile",
+    "^ether cash settled - chicago mercantile",
+    "^nano solana - coinbase",
+]
+
+_TEXT_COLUMN_CANDIDATES = [
+    "commodity_name",
+    "commodity",
+    "market_and_exchange_names",
+    "market_and_exchange_name",
+    "name",
+    "commodity_name_2",
+]
+
+
+def _target_pattern(targets: list[str]) -> str:
+    """Regex alternation of escaped targets; a leading '^' anchors that target to the start of the text."""
+    parts = []
+    for target in targets:
+        if target.startswith("^"):
+            parts.append("^" + re.escape(target[1:]))
+        else:
+            parts.append(re.escape(target))
+    return "|".join(parts)
+
+
 def filter_target_commodities(df: pd.DataFrame, targets: list[str] | None = None) -> pd.DataFrame:
     if df.empty:
         return df
 
-    targets = [t.lower() for t in (targets or ["gold", "silver", "gld", "slv"])]
-    text_candidates = [
-        "commodity_name",
-        "commodity",
-        "market_and_exchange_names",
-        "market_and_exchange_name",
-        "name",
-        "commodity_name_2",
-    ]
-
-    text_col = next((name for name in text_candidates if name in df.columns), None)
-    if text_col is None:
+    targets = [t.lower() for t in (targets or DEFAULT_TARGETS)]
+    text_cols = [name for name in _TEXT_COLUMN_CANDIDATES if name in df.columns]
+    if not text_cols:
         return df
 
-    target_pattern = "|".join(re.escape(t) for t in targets)
-    filtered = df[df[text_col].fillna("").astype(str).str.lower().str.contains(target_pattern, na=False)]
-    return filtered
+    pattern = _target_pattern(targets)
+    mask = pd.Series(False, index=df.index)
+    for column in text_cols:
+        mask |= df[column].fillna("").astype(str).str.lower().str.contains(pattern, na=False)
+    return df[mask]
 
 
 def _find_column(columns: list[str], *patterns: str) -> str | None:
@@ -73,6 +100,8 @@ def _find_column(columns: list[str], *patterns: str) -> str | None:
 SPEC_CATEGORIES: list[tuple[str, str, str]] = [
     ("managed_money", r"m_money_positions_long_all", r"m_money_positions_short_all"),
     ("noncommercial", r"noncommercial_positions_long_all", r"noncommercial_positions_short_all"),
+    # The CFTC API's JSON field names abbreviate the same Legacy columns.
+    ("noncommercial", r"noncomm_positions_long_all", r"noncomm_positions_short_all"),
 ]
 
 COMMODITY_COLUMN_CANDIDATES = [
@@ -203,7 +232,11 @@ def _parse_cot_payload(payload: bytes) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(payload), low_memory=False)
 
 
-def load_cot_data(source: str | None = None, csv_path: str | None = None) -> pd.DataFrame:
+def load_cot_data(
+    source: str | None = None,
+    csv_path: str | None = None,
+    targets: list[str] | None = None,
+) -> pd.DataFrame:
     resolved_source = source or csv_path or os.getenv("CFTC_COT_URL")
     if not resolved_source:
         raise SystemExit(
@@ -213,26 +246,37 @@ def load_cot_data(source: str | None = None, csv_path: str | None = None) -> pd.
     payload = read_cot_bytes(resolved_source)
     df = _parse_cot_payload(payload)
     df = normalize_cot_columns(df)
-    df = filter_target_commodities(df, ["gold", "silver", "gld", "slv"])
+    df = filter_target_commodities(df, targets or DEFAULT_TARGETS)
     df = add_positioning_metrics(df)
     df = add_release_date(df)
     return df
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect and normalize CFTC COT data for metals markets.")
-    parser.add_argument("--source-url", default=None, help="Remote CSV or ZIP URL for the CFTC COT report.")
+    parser = argparse.ArgumentParser(description="Collect and normalize CFTC COT data for metals and crypto markets.")
+    parser.add_argument(
+        "--source-url",
+        action="append",
+        default=None,
+        help="Remote CSV/ZIP/JSON URL for a CFTC COT report. Repeat to combine reports (e.g. the "
+        "Disaggregated report for metals plus the Legacy report, which is where CME Bitcoin/Ether "
+        "and Coinbase Nano Solana appear).",
+    )
     parser.add_argument("--csv-path", default=None, help="Local CSV or ZIP file path to an existing CFTC COT export.")
     parser.add_argument(
         "--commodities",
         nargs="*",
-        default=["gold", "silver"],
-        help="Target commodity names to keep in the normalized output.",
+        default=DEFAULT_TARGETS,
+        help="Target names to keep (a leading '^' anchors to the start of the market name).",
     )
     args = parser.parse_args()
 
-    df = load_cot_data(source=args.source_url, csv_path=args.csv_path)
-    filtered = filter_target_commodities(df, args.commodities)
+    sources = args.source_url or [None]
+    frames = [
+        load_cot_data(source=source, csv_path=args.csv_path, targets=args.commodities)
+        for source in sources
+    ]
+    filtered = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
     out_path = DATA_DIR / "cot_data.parquet"
     filtered.to_parquet(out_path, index=False)
     print(f"Saved {len(filtered)} COT rows to {out_path}")

@@ -38,3 +38,9 @@ def load_futures_tickers(path: str | Path = TICKERS_PATH) -> list[str]:
     with open(path, encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     return list(raw.get("futures", []))
+
+
+def load_cash_like_tickers(path: str | Path = TICKERS_PATH) -> list[str]:
+    with open(path, encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+    return list(raw.get("cash_like", []))

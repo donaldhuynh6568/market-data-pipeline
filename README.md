@@ -20,6 +20,7 @@ market-data-pipeline/
 │   ├── tickers.py
 │   ├── storage.py
 │   ├── combine.py
+│   ├── picks.py
 │   ├── collectors/
 │   │   ├── __init__.py
 │   │   ├── price.py
@@ -29,15 +30,29 @@ market-data-pipeline/
 │   │   ├── sec.py
 │   │   ├── congress.py
 │   │   ├── insider.py
-│   │   └── institutional.py
-│   └── transforms/
-│       ├── __init__.py
-│       └── gex.py
+│   │   ├── institutional.py
+│   │   ├── perps.py
+│   │   ├── deribit_options.py
+│   │   └── news.py
+│   ├── transforms/
+│   │   ├── __init__.py
+│   │   ├── gex.py
+│   │   └── momentum.py
+│   └── reports/
+│       ├── confluence_report.py
+│       ├── rating_rules.py
+│       ├── resistance_ladder.py
+│       ├── note_templates.py
+│       ├── insider_flags.py
+│       ├── news_context.py
+│       └── llm_notes.py
 ├── collect_price_data.py
 ├── collect_options_data.py
 ├── collect_cot_data.py
+├── collect_news_data.py
 ├── combine.py
 ├── tickers.yaml
+├── confluence_report_rules.yaml
 ├── pyproject.toml
 ├── .env
 ├── README.md
@@ -82,6 +97,84 @@ SUPABASE_KEY=your_supabase_key
 ```
 
 The project reads your existing `.env` automatically.
+
+## Quick start: what to run
+
+Copy a block, paste it into the terminal, and run it from the project root. Single quotes around URLs work in both Git Bash and PowerShell.
+
+### Daily refresh (prices, momentum, crypto derivatives, workbook)
+
+```bash
+uv run collect_price_data.py --days 90
+uv run python -m market_data_pipeline.transforms.momentum
+uv run python -m market_data_pipeline.collectors.perps --venues hyperliquid
+uv run python -m market_data_pipeline.collectors.deribit_options
+uv run python -m market_data_pipeline.collectors.news
+uv run python -m market_data_pipeline.combine
+uv run python -m market_data_pipeline.reports.confluence_report
+```
+
+The news line fetches headlines for your picks (see "Collect news for your picks" below), and the last line builds the confluence report; it only reads what the earlier lines produced.
+
+Use `--days 300` on the price command if you want the 200-day MA flag in the momentum sheet. Drop `--venues hyperliquid` to also try Binance (geo-blocked in the US, so it just prints an error and is skipped).
+
+### Confluence report (analysis only)
+
+Reads the parquet files already in `data/` and writes `data/Confluence_Report_<date>.xlsx`. It does **not** run any collectors, so refresh your data first (the "Run everything" block below). If a required file is missing it tells you which one and the command that creates it. Thresholds and the focus list are in `confluence_report_rules.yaml`. If `data/news_data.parquet` exists the report adds a News column (see below).
+
+```bash
+uv run python -m market_data_pipeline.reports.confluence_report
+```
+
+Optional: have Claude rewrite the notes (needs `ANTHROPIC_API_KEY` or `ant auth login`; ratings and targets are unchanged):
+
+```bash
+uv run --with anthropic python -m market_data_pipeline.reports.confluence_report --llm-notes
+```
+
+### Weekly (CFTC publishes Fridays): COT positioning for gold, silver, BTC, ETH, SOL
+
+```bash
+uv run python -m market_data_pipeline.collectors.cot --source-url 'https://publicreporting.cftc.gov/api/v3/views/kh3c-gbw2/query.json' --source-url 'https://publicreporting.cftc.gov/resource/6dca-aqww.json?$limit=50000&$where=market_and_exchange_names%20like%20%27%25BITCOIN%25%27%20OR%20market_and_exchange_names%20like%20%27%25ETHER%25%27%20OR%20market_and_exchange_names%20like%20%27%25SOLANA%25%27'
+uv run python -m market_data_pipeline.combine
+```
+
+If CFTC returns an HTTP 503, their API is down; try again later.
+
+### Options and GEX (equities)
+
+```bash
+uv run python -m market_data_pipeline.collectors.options --moneyness 0.20 --max-expiry-days 60
+uv run python -m market_data_pipeline.transforms.gex
+uv run python -m market_data_pipeline.combine
+```
+
+### Intraday structure and volume
+
+```bash
+uv run python -m market_data_pipeline.collectors.price --timeframe 1Hour
+uv run python -m market_data_pipeline.collectors.price --timeframe 4Hour
+uv run python -m market_data_pipeline.collectors.price --timeframe 5Min
+uv run python -m market_data_pipeline.transforms.swing_structure --timeframe 1h
+uv run python -m market_data_pipeline.transforms.swing_structure --timeframe 4h
+uv run python -m market_data_pipeline.transforms.volume_floor
+uv run python -m market_data_pipeline.collectors.futures_volume
+```
+
+### Macro, fundamentals, and filings (occasional)
+
+```bash
+uv run python -m market_data_pipeline.collectors.fred
+uv run python -m market_data_pipeline.collectors.fomc
+uv run python -m market_data_pipeline.collectors.fundamentals
+uv run python -m market_data_pipeline.transforms.fundamentals_ratios
+uv run python -m market_data_pipeline.collectors.sec
+uv run python -m market_data_pipeline.collectors.insider
+uv run python -m market_data_pipeline.collectors.institutional
+uv run python -m market_data_pipeline.combine
+```
+
+Details for each step follow below.
 
 ## Recommended execution pattern
 
@@ -158,6 +251,20 @@ CFTC_COT_URL=https://publicreporting.cftc.gov/api/v3/views/kh3c-gbw2/query.json
 ```
 
 This writes a parquet file to `data/cot_data.parquet`.
+
+CME Bitcoin, CME Ether and Coinbase Nano Solana futures are also kept, but they only appear in the CFTC **Legacy** report, not the Disaggregated one above. To include them, pass the Legacy dataset as a second source (repeat `--source-url`):
+
+```bash
+uv run python -m market_data_pipeline.collectors.cot --source-url 'https://publicreporting.cftc.gov/api/v3/views/kh3c-gbw2/query.json' --source-url 'https://publicreporting.cftc.gov/resource/6dca-aqww.json?$limit=50000&$where=market_and_exchange_names%20like%20%27%25BITCOIN%25%27%20OR%20market_and_exchange_names%20like%20%27%25ETHER%25%27%20OR%20market_and_exchange_names%20like%20%27%25SOLANA%25%27'
+```
+
+### Momentum, crypto perps, and Deribit options
+
+```bash
+uv run python -m market_data_pipeline.transforms.momentum          # score + 5/10/20d deltas; needs price data, use --days 90+; optional --as-of YYYY-MM-DD
+uv run python -m market_data_pipeline.collectors.perps             # funding rate + open interest (BTC/ETH/SOL)
+uv run python -m market_data_pipeline.collectors.deribit_options   # BTC/ETH options + crypto GEX
+```
 
 ### 6) Calculate gamma exposure (GEX) from the options chain
 
@@ -241,16 +348,66 @@ in `tickers.yaml` (`MNQ=F`, `MES=F`, `SIL=F`), overridable with `--tickers`.
 Writes `data/futures_volume_5m.parquet` with a `volume_floor_met` flag
 (`volume >= 20,000` contracts per 5-minute bar).
 
-### 13) Combine the parquet files into Excel
+### 13) Collect fundamentals / cash-flow data (SEC XBRL)
+
+```bash
+uv run python -m market_data_pipeline.collectors.fundamentals
+```
+
+For each `large_cap` ticker, fetches SEC's XBRL companyfacts API and extracts
+raw cash-flow, balance-sheet, and income-statement facts (revenue, net
+income, operating income, interest expense, D&A, operating cash flow, CapEx,
+cash, total debt, shares outstanding) — one row per fiscal period (10-K/10-Q).
+No new API key needed; reuses `SEC_USER_AGENT`. Writes
+`data/fundamentals_data.parquet`. See DATA_DEFINITION.md for the XBRL
+tag-fallback caveats.
+
+### 14) Compute derived fundamentals ratios
+
+```bash
+uv run python -m market_data_pipeline.transforms.fundamentals_ratios
+```
+
+Reads `data/fundamentals_data.parquet` and derives free cash flow (FCF), FCF
+margin, cash conversion ratio, CapEx as % of revenue (+ trailing trend), net
+debt, net debt/EBITDA, and interest coverage. Writes
+`data/fundamentals_ratios.parquet`.
+
+### 15) Combine the parquet files into Excel
 
 ```bash
 uv run python -m market_data_pipeline.combine
 ```
 
-The shortcut wrappers still work too:
+### 16) Collect news for your picks
 
 ```bash
-uv run collect_cot_data.py 
+uv run python -m market_data_pipeline.collectors.news
+```
+
+Pulls Alpaca's news feed (Benzinga; uses your existing Alpaca keys) and writes `data/news_data.parquet`. With no flags it fetches your picks: the focus list in `confluence_report_rules.yaml` plus every ACCELERATING name in `momentum.parquet` (so run the momentum step first). Override with tickers, crypto as `BTC/USD`:
+
+```bash
+uv run python -m market_data_pipeline.collectors.news --symbols AVGO AMD BTC/USD --days 14
+```
+
+Options: `--days` (how far back each run looks, default 7), `--limit` (max articles per ticker, default 50), `--keep-days` (drop stored articles older than this, default 90). Each run appends to the file and dedupes by article id, so history builds up. Every article is rated HIGH (headline names the asset), MEDIUM (tagged to it and only a few others) or LOW (multi-ticker roundup). The feed has no company names, so add a name for any pick you want matched in headlines under `news.aliases` in `confluence_report_rules.yaml`. See DATA_DEFINITION.md section 22.
+
+### 17) Build the confluence report
+
+```bash
+uv run python -m market_data_pipeline.reports.confluence_report
+```
+
+Analysis only: reads the existing parquets (momentum, GEX, options, 1H/4H swing structure, plus optional Deribit, perps, insider, COT and news data) and writes `data/Confluence_Report_<date>.xlsx` with ratings, targets and a resistance ladder. It never runs collectors, so refresh the data first. Thresholds and the focus list live in `confluence_report_rules.yaml`. Add `--llm-notes` (with `uv run --with anthropic ...`) to have Claude rewrite the notes. See DATA_DEFINITION.md sections 21 and 22.
+
+### Run everything (copy the whole block)
+
+This runs every collector and transform in dependency order, then builds the workbook. Paste the whole block into the terminal from the project root. It can take several minutes; if one step fails, the next ones still run.
+
+```bash
+uv run python -m market_data_pipeline.collectors.cot --source-url 'https://publicreporting.cftc.gov/api/v3/views/kh3c-gbw2/query.json' --source-url 'https://publicreporting.cftc.gov/resource/6dca-aqww.json?$limit=50000&$where=market_and_exchange_names%20like%20%27%25BITCOIN%25%27%20OR%20market_and_exchange_names%20like%20%27%25ETHER%25%27%20OR%20market_and_exchange_names%20like%20%27%25SOLANA%25%27'
+
 uv run collect_price_data.py --days 90
 uv run python -m market_data_pipeline.collectors.price --timeframe 1Hour
 uv run python -m market_data_pipeline.collectors.price --timeframe 4Hour
@@ -258,18 +415,23 @@ uv run python -m market_data_pipeline.collectors.price --timeframe 5Min
 uv run python -m market_data_pipeline.transforms.swing_structure --timeframe 1h
 uv run python -m market_data_pipeline.transforms.swing_structure --timeframe 4h
 uv run python -m market_data_pipeline.transforms.volume_floor
-
-
+uv run python -m market_data_pipeline.transforms.momentum
 uv run python -m market_data_pipeline.collectors.options --moneyness 0.20 --max-expiry-days 60
 uv run python -m market_data_pipeline.transforms.gex
 
+uv run python -m market_data_pipeline.collectors.perps --venues hyperliquid
+uv run python -m market_data_pipeline.collectors.deribit_options
+uv run python -m market_data_pipeline.collectors.news
 uv run python -m market_data_pipeline.collectors.fred
 uv run python -m market_data_pipeline.collectors.fomc
-
-
 uv run python -m market_data_pipeline.collectors.futures_volume
-uv run combine.py
+uv run python -m market_data_pipeline.collectors.fundamentals
+uv run python -m market_data_pipeline.transforms.fundamentals_ratios
+uv run python -m market_data_pipeline.combine
+uv run python -m market_data_pipeline.reports.confluence_report
 ```
+
+`collect_cot_data.py`, `collect_price_data.py` and `combine.py` in the project root are shortcut wrappers for the COT, price and combine entrypoints. The COT wrapper needs `CFTC_COT_URL` set in `.env`, which is why the block above calls the module with explicit URLs instead. SEC filings, insider trades and 13F holdings (`collectors.sec`, `collectors.insider`, `collectors.institutional`) are left out of the block because they are slow and rarely change; run them separately when you want them.
 
 ## Testing and quality checks
 
@@ -328,12 +490,18 @@ When the collection scripts run, they generate files inside `data/`:
 - `options_data.parquet`
 - `cot_data.parquet`
 - `gex_data.parquet`
+- `momentum.parquet`
+- `perps_data.parquet`
+- `deribit_options.parquet`
+- `gex_crypto.parquet`
+- `news_data.parquet`
 - `fred_data.parquet`
 - `sec_filings.parquet`
 - `congress_trades.parquet`
 - `insider_trades.parquet`
 - `institutional_holdings.parquet`
 - `market_data.xlsx`
+- `Confluence_Report_<date>.xlsx`
 
 These are local runtime artifacts and should not be committed to source control.
 

@@ -20,7 +20,11 @@ def compute_contract_gex(df: pd.DataFrame) -> pd.DataFrame:
     gamma = pd.to_numeric(result["gamma"], errors="coerce").fillna(0)
     open_interest = pd.to_numeric(result["open_interest"], errors="coerce").fillna(0)
     spot = pd.to_numeric(result["spot_price"], errors="coerce")
-    result["gamma_exposure"] = sign * gamma * open_interest * CONTRACT_MULTIPLIER * spot**2 * 0.01
+    if "contract_multiplier" in result.columns:
+        multiplier = pd.to_numeric(result["contract_multiplier"], errors="coerce").fillna(CONTRACT_MULTIPLIER)
+    else:
+        multiplier = CONTRACT_MULTIPLIER
+    result["gamma_exposure"] = sign * gamma * open_interest * multiplier * spot**2 * 0.01
     return result
 
 
