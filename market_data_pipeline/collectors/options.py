@@ -17,8 +17,15 @@ from alpaca.trading.enums import AssetStatus
 from alpaca.trading.requests import GetOptionContractsRequest
 
 from market_data_pipeline.config import require_alpaca_credentials
-from market_data_pipeline.storage import save_parquet, upsert_to_supabase
+from market_data_pipeline.storage import (
+    merge_parquet,
+    prune_old_snapshots,
+    save_parquet,
+    upsert_to_supabase,
+)
 from market_data_pipeline.tickers import load_tickers
+
+DEFAULT_KEEP_DAYS = 90
 
 
 def get_spot_price(stock_client: StockHistoricalDataClient, symbol: str) -> float | None:
@@ -163,6 +170,12 @@ def main() -> None:
         default=60,
         help="Only include contracts expiring within this many days",
     )
+    parser.add_argument(
+        "--keep-days",
+        type=int,
+        default=DEFAULT_KEEP_DAYS,
+        help="Drop stored snapshots older than this many days (~22k rows per daily snapshot).",
+    )
     args = parser.parse_args()
 
     api_key, secret_key = require_alpaca_credentials()
@@ -207,8 +220,12 @@ def main() -> None:
     combined = compute_flow_metrics(combined)
     combined["snapshot_date"] = date.today().isoformat()
 
-    out_path = save_parquet(combined, "options_data.parquet")
-    print(f"\nSaved {len(combined)} contract rows to {out_path}")
+    # Append this snapshot to the stored history; a second run on the same day replaces that day's rows.
+    history = prune_old_snapshots(
+        merge_parquet(combined, "options_data.parquet", ["contract_symbol", "snapshot_date"]), args.keep_days
+    )
+    out_path = save_parquet(history, "options_data.parquet")
+    print(f"\nSaved {len(combined)} contract rows to {out_path} ({len(history)} across all stored snapshots)")
 
     flagged = combined[combined["unusual_activity"]]
     print(f"{len(flagged)} contracts flagged for unusual activity (vol/OI > 1.0)")

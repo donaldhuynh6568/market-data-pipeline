@@ -37,7 +37,8 @@ market-data-pipeline/
 │   ├── transforms/
 │   │   ├── __init__.py
 │   │   ├── gex.py
-│   │   └── momentum.py
+│   │   ├── momentum.py
+│   │   └── location.py
 │   └── reports/
 │       ├── confluence_report.py
 │       ├── rating_rules.py
@@ -45,6 +46,7 @@ market-data-pipeline/
 │       ├── note_templates.py
 │       ├── insider_flags.py
 │       ├── news_context.py
+│       ├── position_levels.py
 │       └── llm_notes.py
 ├── collect_price_data.py
 ├── collect_options_data.py
@@ -91,6 +93,13 @@ FRED_API_KEY=your_fred_api_key
 # fair-use policy requires a descriptive User-Agent with contact info.
 SEC_USER_AGENT=YourApp your-email@example.com
 
+# Optional: account sizing for the confluence report's Size / Position $ / Risk $ columns.
+# These override the `sizing:` fallbacks in confluence_report_rules.yaml, so your real account
+# number never has to live in a tracked file. The report still runs without them.
+ACCOUNT_SIZE=100000
+RISK_PER_TRADE_PCT=1.0
+MAX_POSITION_PCT=25
+
 # Optional
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your_supabase_key
@@ -102,21 +111,34 @@ The project reads your existing `.env` automatically.
 
 Copy a block, paste it into the terminal, and run it from the project root. Single quotes around URLs work in both Git Bash and PowerShell.
 
+Two kinds of script, and it matters when something looks stale:
+
+- **Collectors** (`collectors.*`, and the `collect_*.py` wrappers) call an outside API and are the only things that bring in new data. They need network access and, for most of them, API keys in `.env`.
+- **Transforms and reports** (`transforms.*`, `combine`, `reports.*`) never fetch anything. They only read the parquet files already in `data/`, so re-running one after a code change is instant and safe — but it cannot make the underlying data any fresher than the last collector run.
+
+So a number that looks out of date is almost always a collector that has not been run, not a transform that needs re-running.
+
 ### Daily refresh (prices, momentum, crypto derivatives, workbook)
 
 ```bash
-uv run collect_price_data.py --days 90
+uv run collect_price_data.py
 uv run python -m market_data_pipeline.transforms.momentum
+uv run python -m market_data_pipeline.transforms.location
+uv run python -m market_data_pipeline.transforms.ict_levels      # opens, session highs/lows, equal highs/lows
+uv run python -m market_data_pipeline.transforms.flow_indicators # CMF/MFI/OBV, relative strength, anchored VWAP, volume profile
+uv run python -m market_data_pipeline.transforms.flow_backtest   # scores the daily flow votes (adds a Flow Backtest tab)
+uv run python -m market_data_pipeline.transforms.backtest
 uv run python -m market_data_pipeline.collectors.perps --venues hyperliquid
 uv run python -m market_data_pipeline.collectors.deribit_options
 uv run python -m market_data_pipeline.collectors.news
-uv run python -m market_data_pipeline.combine
+uv run python -m market_data_pipeline.combine   # --days 90 by default: trailing window on the big sheets so Excel can open it
 uv run python -m market_data_pipeline.reports.confluence_report
 ```
 
-The news line fetches headlines for your picks (see "Collect news for your picks" below), and the last line builds the confluence report; it only reads what the earlier lines produced.
+The location line derives entry/stop levels from the daily bars, the news line fetches headlines for your picks, and the last line builds the confluence report; it only reads what the earlier lines produced.
 
-Use `--days 300` on the price command if you want the 200-day MA flag in the momentum sheet. Drop `--venues hyperliquid` to also try Binance (geo-blocked in the US, so it just prints an error and is skipped).
+The price collector now defaults to two years, which is what makes the 200-day MA flag work and gives the backtest
+a usable sample. Intraday timeframes are capped near 60 days by the free tier and simply return what exists. Drop `--venues hyperliquid` to also try Binance (geo-blocked in the US, so it just prints an error and is skipped).
 
 ### Confluence report (analysis only)
 
@@ -183,10 +205,12 @@ For maintainability, prefer the package entrypoints instead of raw script files:
 ### 1) Collect price data
 
 ```bash
-uv run python -m market_data_pipeline.collectors.price --days 90
+uv run python -m market_data_pipeline.collectors.price --days 730
 ```
 
-Daily bars by default. For intraday bars, add `--timeframe`:
+Daily bars by default. Refreshes are incremental: if the parquet already exists, only bars newer than each symbol's last stored bar (minus a short overlap that replaces the still-forming bar) are fetched and appended, so re-running is cheap and never shrinks history. `--days` only sizes a first run or a newly added ticker. Pass `--full` to re-download the whole window and overwrite the file (it warns if that would drop stored bars). The same applies to every `--timeframe`.
+
+The perps, options and Deribit collectors also append: each run adds a snapshot (same-day reruns replace that day), so funding/OI and options history build up. Options and Deribit keep the last 90 days (`--keep-days`); the confluence report and the combined workbook read only the latest snapshot. For intraday bars, add `--timeframe`:
 
 ```bash
 uv run python -m market_data_pipeline.collectors.price --timeframe 1Hour
@@ -218,7 +242,8 @@ uv run python -m market_data_pipeline.transforms.volume_floor
 ```
 
 Reads `data/price_data_5m.parquet` (run `collectors.price --timeframe 5Min`
-first), defaults to the `large_cap` tickers (override with `--symbols`), and
+first), covers every symbol in the file by default including ETFs and crypto
+(restrict with `--symbols`), and
 flags each bar against **that symbol's own trailing baseline** — not a fixed
 number like the futures volume-floor check. Default: a bar is flagged if its
 volume is at least 2x (`--multiplier`) the trailing 20-bar (`--window`)
@@ -393,19 +418,66 @@ uv run python -m market_data_pipeline.collectors.news --symbols AVGO AMD BTC/USD
 
 Options: `--days` (how far back each run looks, default 7), `--limit` (max articles per ticker, default 50), `--keep-days` (drop stored articles older than this, default 90). Each run appends to the file and dedupes by article id, so history builds up. Every article is rated HIGH (headline names the asset), MEDIUM (tagged to it and only a few others) or LOW (multi-ticker roundup). The feed has no company names, so add a name for any pick you want matched in headlines under `news.aliases` in `confluence_report_rules.yaml`. See DATA_DEFINITION.md section 22.
 
-### 17) Build the confluence report
+### 17) Derive entry, stop and target levels
+
+```bash
+uv run python -m market_data_pipeline.transforms.location
+```
+
+Reads `price_data.parquet` (daily bars) and writes `data/location_levels.parquet` (one row per symbol) and
+`data/location_zones.parquet` (every detected zone). Implements the price-action layer in
+`reference/Location Confluence Playbook.md`: the dealing range and its CE/OTE quadrants, three-candle fair value
+gaps with a displacement score, the entry at a zone's near edge, and the stop at the pre-imbalance candle.
+Thresholds live under `location:` in `confluence_report_rules.yaml`. See DATA_DEFINITION.md section 23.
+
+### 18) Build the confluence report
 
 ```bash
 uv run python -m market_data_pipeline.reports.confluence_report
 ```
 
-Analysis only: reads the existing parquets (momentum, GEX, options, 1H/4H swing structure, plus optional Deribit, perps, insider, COT and news data) and writes `data/Confluence_Report_<date>.xlsx` with ratings, targets and a resistance ladder. It never runs collectors, so refresh the data first. Thresholds and the focus list live in `confluence_report_rules.yaml`. Add `--llm-notes` (with `uv run --with anthropic ...`) to have Claude rewrite the notes. See DATA_DEFINITION.md sections 21 and 22.
+Analysis only: reads the existing parquets (momentum, GEX, options, 1H/4H swing structure, plus optional Deribit, perps, insider, COT, news and location data) and writes `data/Confluence_Report_<date>.xlsx` with ratings, targets and a resistance ladder. It never runs collectors, so refresh the data first. Thresholds and the focus list live in `confluence_report_rules.yaml`. Add `--llm-notes` (with `uv run --with anthropic ...`) to have Claude rewrite the notes. With location data present it also fills the Setup/Entry/Stop/Risk %/Target/R:R/Size columns and a Key Levels tab.
+
+**The Summary tab is the daily read.** Fifteen columns in plain words, grouped under banners: the `Read` (one
+sentence on the technical picture), then **MOMENTUM** (Trend, Score), **LEVELS (ICT)** (Level, Buy at, Stop,
+Target, Stop room), **RISK** (Shares, Cost $, Risk $, Reward:Risk) and **EVIDENCE** (`Past edge`).
+
+Rows are ranked by `Past edge` - what setups sharing that profile have actually been worth on the bars collected
+so far, taken from the Backtest tab's **ICT target-exit** scorecard (momentum, zone quality and whether the entry
+zone already failed the body-vs-wick respect test). Stop width plays no part in ranking - it is a risk-sizing
+input, not a reason one setup should out-rank another. The sheet describes and ranks; it does not tell you to buy,
+because as of today nothing in it has shown an edge worth instructing on.
+
+Supporting tabs: **Detail** (the raw technicals behind each read), **Key Levels** (the zone ladder per name),
+**Resistance Ladder Detail**, **Momentum & Delta** (the full universe) and **Backtest** (below).
+
+### Has any of this worked?
+
+```bash
+uv run python -m market_data_pipeline.transforms.backtest
+```
+
+Scores every historical zone entry on the rule the report uses - buy the near edge, stop at candle 1 - two ways.
+First against a swept set of fixed R-multiples (0.5R-3R), reporting win rate and expectancy by zone quality, stop
+width, momentum at entry and reward multiple next to a random-entry control; writes `data/backtest_summary.parquet`.
+Second, resolved against the **real ICT target** a live plan would actually hold for (CE, OTE, the dealing-range
+high or the nearest smooth swing high) instead of a fixed multiple - this is what the Summary tab's `Rank` is
+actually built on; writes `data/backtest_target_summary.parquet`. Both land on the Backtest tab.
+
+**Read the output before trusting the report.** On two years of daily bars (3,988 zone trades, fixed-R scorecard)
+momentum at entry is the one feature that orders size outcomes consistently: score above 0.2 returns +0.210R,
+negative returns -0.194R - that is why momentum drives position size. Zone quality does not order size the same
+way (crossed against momentum it inverts), so it does not change size, but it is re-included in **ranking** via the
+target-exit scorecard, where the question is asked against a real exit rather than a synthetic one. The
+random-entry control still beats the average zone entry on both scorecards, so treat ranking as relative order
+only - the report says so on both tabs. See DATA_DEFINITION.md sections 21 to 23.
 
 ### Run everything (copy the whole block)
 
 This runs every collector and transform in dependency order, then builds the workbook. Paste the whole block into the terminal from the project root. It can take several minutes; if one step fails, the next ones still run.
 
 ```bash
+uv run python -m market_data_pipeline.collectors.insider
 uv run python -m market_data_pipeline.collectors.cot --source-url 'https://publicreporting.cftc.gov/api/v3/views/kh3c-gbw2/query.json' --source-url 'https://publicreporting.cftc.gov/resource/6dca-aqww.json?$limit=50000&$where=market_and_exchange_names%20like%20%27%25BITCOIN%25%27%20OR%20market_and_exchange_names%20like%20%27%25ETHER%25%27%20OR%20market_and_exchange_names%20like%20%27%25SOLANA%25%27'
 
 uv run collect_price_data.py --days 90
@@ -416,6 +488,8 @@ uv run python -m market_data_pipeline.transforms.swing_structure --timeframe 1h
 uv run python -m market_data_pipeline.transforms.swing_structure --timeframe 4h
 uv run python -m market_data_pipeline.transforms.volume_floor
 uv run python -m market_data_pipeline.transforms.momentum
+uv run python -m market_data_pipeline.transforms.location
+uv run python -m market_data_pipeline.transforms.backtest
 uv run python -m market_data_pipeline.collectors.options --moneyness 0.20 --max-expiry-days 60
 uv run python -m market_data_pipeline.transforms.gex
 
@@ -495,6 +569,8 @@ When the collection scripts run, they generate files inside `data/`:
 - `deribit_options.parquet`
 - `gex_crypto.parquet`
 - `news_data.parquet`
+- `location_levels.parquet`
+- `location_zones.parquet`
 - `fred_data.parquet`
 - `sec_filings.parquet`
 - `congress_trades.parquet`

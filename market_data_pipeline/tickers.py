@@ -8,6 +8,12 @@ import yaml
 from .config import TICKERS_PATH
 
 
+def _unique(symbols: list[str]) -> list[str]:
+    """First-seen order, no duplicates. A symbol can sit in two categories (XLU is broad_market and a sector)
+    and must still be collected, stored and reported once."""
+    return list(dict.fromkeys(symbols))
+
+
 def load_tickers_from_dict(raw: dict[str, Any] | None) -> dict[str, list[str]]:
     raw = raw or {}
     equities: list[str] = []
@@ -16,8 +22,8 @@ def load_tickers_from_dict(raw: dict[str, Any] | None) -> dict[str, list[str]]:
             equities.extend(category_tickers)
 
     return {
-        "equities": equities,
-        "crypto": list(raw.get("crypto", [])),
+        "equities": _unique(equities),
+        "crypto": _unique(list(raw.get("crypto", []))),
     }
 
 

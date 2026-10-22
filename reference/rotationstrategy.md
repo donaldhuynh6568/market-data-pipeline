@@ -5,32 +5,12 @@
 **Custom Basket Strategy**: Momentum-based rotation between 25 selected assets including individual stocks, ETFs, and crypto, applying lessons from successful ETF rotation strategies.
 
 **Target Assets**: Mixed portfolio of growth stocks, international exposure, defensive assets, and alternative investments
-- **Growth Tech**: META, PLTR, NVDA, MSFT, TSM, AAPL, AMZN, GOOGL, PANW, NFLX
-- **Consumer/Services**: CAVA, COST, DAL, SPOT, HOOD
-- **International**: BABA, FXI, ASML, CQQQ
-- **Traditional Value**: AXP
-- **ETF Exposure**: QQQ
-- **Alternative Assets**: GLD, BTC, ETH, COIN
+
 
 **Strategy Goal**: Apply proven rotation methodology to high-growth individual stock universe while maintaining risk management principles.
 
 ## Custom Basket Analysis & Challenges
 
-### Asset Categories & Characteristics
-**High Volatility Growth (70% of basket)**
-- Individual tech stocks: META, PLTR, NVDA, MSFT, TSM, AAPL, AMZN, GOOGL, PANW, NFLX
-- Higher volatility than ETFs but potentially higher momentum signals
-- Correlation risk during market downturns
-
-**International Exposure (16%)**
-- China focus: BABA, FXI, CQQQ
-- European: ASML  
-- Different economic cycles but still equity-correlated
-
-**Defensive/Alternative Assets (14%)**
-- Traditional safe haven: GLD
-- Crypto exposure: BTC, ETH, COIN
-- Note: Crypto may not provide traditional defensive properties
 
 ### Key Differences from Original ETF Strategy
 **Advantages:**

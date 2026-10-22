@@ -66,14 +66,20 @@ environment:
       reason — too little movement to confirm two swings in 30 days.
 
 location:
-  source_file: null
-  source_output: null
-  status: not_built
+  source_file: market_data_pipeline/transforms/location.py
+  source_output: "data/location_levels.parquet, data/location_zones.parquet"
+  status: built
+  swing_window_bars: 3 # reuses find_swing_points() from swing_structure.py
+  lookback_days: 25 # matches location.lookback_days in confluence_report_rules.yaml
   note: >
-    Fibonacci retracement / golden-pocket zones / FVG — no TA logic for this
-    exists yet. Partially unblocked: swing_structure.py's find_swing_points()
-    now produces the actual swing-high/low values a Fib calculation would be
-    built from, they just aren't turned into retracement zones yet.
+    Daily-bar implementation of reference/Location Confluence Playbook.md:
+    dealing range with CE (50%) / OTE (75%) quadrant grading, three-candle FVG
+    zones with a displacement score, entry at a zone's near edge and the stop at
+    the pre-imbalance candle, plus smooth/jagged classification of swing levels.
+    Surfaced in the confluence report as Setup/Entry/Stop/Risk %/Target/R:R/Size
+    columns and a Key Levels tab. Still daily-only — the opening-range half-gap
+    rule and session/kill-zone timing remain blocked on intraday RTH data, and
+    nothing here tracks real open positions (see execution below).
 
 confirmation:
   source_file: null
@@ -92,7 +98,7 @@ execution:
   note: "No trade journal, position tracking, or order management exists in this pipeline"
 
 status_summary:
+  location: built # daily-bar layer only; intraday half-gap and kill-zone timing still missing
   environment: built # both GEX regime and intraday structure are now automated
-  location: manual_only
   confirmation: manual_only
   execution: manual_only

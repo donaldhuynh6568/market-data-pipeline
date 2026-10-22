@@ -16,6 +16,7 @@ equities:
     - IWM
     - XLU
     - SMH
+    
   large_cap:
     - AAPL
     - MSFT
@@ -32,6 +33,7 @@ equities:
     - TSLA
     - FICO
     - JPM
+    - INTC
     - V
     - UNH
     - PG
@@ -55,6 +57,8 @@ equities:
   alternative:
     - GLD
     - SLV
+    - IBIT
+    - IETH
 
 crypto:
   - BTC/USD

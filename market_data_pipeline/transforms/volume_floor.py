@@ -5,7 +5,6 @@ import argparse
 import pandas as pd
 
 from market_data_pipeline.config import DATA_DIR
-from market_data_pipeline.tickers import load_equity_category
 
 INPUT_FILENAME = "price_data_5m.parquet"
 OUTPUT_FILENAME = "volume_floor_5m.parquet"
@@ -14,6 +13,17 @@ OUTPUT_FILENAME = "volume_floor_5m.parquet"
 # to be, the same spirit as the tunable unusual_activity threshold in options.py.
 BASELINE_WINDOW_BARS = 20
 DEFAULT_MULTIPLIER = 2.0
+
+
+def filter_symbols(df: pd.DataFrame, symbols: list[str] | None) -> pd.DataFrame:
+    """Restrict to `symbols`, or keep everything in the file when none are given.
+
+    The default is the whole 5-minute universe rather than one ticker category, so the flagged bars line up
+    with the names the rest of the pipeline reports on.
+    """
+    if not symbols:
+        return df
+    return df[df["symbol"].isin(symbols)]
 
 
 def add_volume_baseline(df: pd.DataFrame, window: int = BASELINE_WINDOW_BARS) -> pd.DataFrame:
@@ -46,7 +56,11 @@ def main() -> None:
         description="Flag 5-minute equity bars with volume well above that symbol's own trailing baseline."
     )
     parser.add_argument(
-        "--symbols", nargs="*", default=None, help="Symbols to include (default: large_cap tickers)."
+        "--symbols",
+        nargs="*",
+        default=None,
+        help="Symbols to include. Default: every symbol in price_data_5m.parquet, which covers the whole "
+        "universe including ETFs and crypto. Cash-like names (SHV) have thin, noisy volume.",
     )
     parser.add_argument(
         "--window", type=int, default=BASELINE_WINDOW_BARS, help="Trailing bars used for the baseline."
@@ -63,12 +77,7 @@ def main() -> None:
             "uv run python -m market_data_pipeline.collectors.price --timeframe 5Min"
         )
 
-    symbols = args.symbols or load_equity_category("large_cap")
-    if not symbols:
-        raise SystemExit("No symbols to process — pass --symbols or add a large_cap category to tickers.yaml.")
-
-    df = pd.read_parquet(input_path)
-    df = df[df["symbol"].isin(symbols)]
+    df = filter_symbols(pd.read_parquet(input_path), args.symbols)
     if df.empty:
         print("No matching rows in price_data_5m.parquet for the requested symbols.")
         return

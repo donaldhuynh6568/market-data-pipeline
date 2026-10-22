@@ -7,7 +7,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from market_data_pipeline.storage import save_parquet
+from market_data_pipeline.storage import merge_parquet, save_parquet
 from market_data_pipeline.tickers import load_tickers
 
 DEFAULT_VENUES = ["binance", "hyperliquid"]
@@ -123,6 +123,14 @@ def collect_perps(pairs: list[str], venues: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def prune_snapshots(df: pd.DataFrame, keep_days: int | None, column: str = "timestamp") -> pd.DataFrame:
+    """Drop rows older than `keep_days` (None keeps everything)."""
+    if keep_days is None or df.empty:
+        return df
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=keep_days)
+    return df[pd.to_datetime(df[column], utc=True) >= cutoff].reset_index(drop=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Collect crypto perpetual funding rates and open interest.")
     parser.add_argument(
@@ -132,6 +140,12 @@ def main() -> None:
         default=DEFAULT_VENUES,
         help="Venues to query (Binance/Bybit are geo-blocked in some regions, e.g. the US).",
     )
+    parser.add_argument(
+        "--keep-days",
+        type=int,
+        default=None,
+        help="Drop stored snapshots older than this many days (default: keep everything).",
+    )
     args = parser.parse_args()
 
     pairs = load_tickers()["crypto"]
@@ -140,8 +154,10 @@ def main() -> None:
         print("No perp data returned from any venue.")
         return
 
-    path = save_parquet(df, "perps_data.parquet")
-    print(f"Saved {len(df)} perp rows to {path}")
+    # Each run is one snapshot at `now`; appending builds the funding/OI history instead of replacing it.
+    merged = prune_snapshots(merge_parquet(df, "perps_data.parquet", ["symbol", "venue", "timestamp"]), args.keep_days)
+    path = save_parquet(merged, "perps_data.parquet")
+    print(f"Saved {len(merged)} perp rows to {path} ({len(df)} added this run)")
 
 
 if __name__ == "__main__":

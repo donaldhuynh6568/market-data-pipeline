@@ -84,3 +84,14 @@ def test_compute_volume_floor_calibrates_independently_per_symbol():
     assert bbb_last["baseline_volume"] == pytest.approx(10000)
     assert aaa_last["volume_floor_met"]
     assert bbb_last["volume_floor_met"]
+
+
+def test_no_symbols_keeps_the_whole_file_while_a_list_restricts_it():
+    from market_data_pipeline.transforms.volume_floor import filter_symbols
+
+    df = pd.DataFrame({"symbol": ["AAPL", "SPY", "BTC/USD"], "volume": [1.0, 2.0, 3.0]})
+
+    # Default is the full universe, not one ticker category - ETFs and crypto included.
+    assert sorted(filter_symbols(df, None)["symbol"]) == ["AAPL", "BTC/USD", "SPY"]
+    assert sorted(filter_symbols(df, [])["symbol"]) == ["AAPL", "BTC/USD", "SPY"]
+    assert filter_symbols(df, ["AAPL"])["symbol"].tolist() == ["AAPL"]

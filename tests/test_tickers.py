@@ -62,3 +62,16 @@ def test_load_cash_like_tickers(tmp_path):
     assert load_cash_like_tickers(path) == ["SHV"]
     path.write_text(yaml.safe_dump({"equities": {}}), encoding="utf-8")
     assert load_cash_like_tickers(path) == []
+
+
+def test_a_symbol_in_two_categories_is_collected_once():
+    """XLU sits in both broad_market and sectors; collecting it twice would duplicate every downstream row."""
+    raw = {
+        "equities": {"broad_market": ["SPY", "XLU"], "sectors": ["XLU", "XLE"]},
+        "crypto": ["BTC/USD", "BTC/USD"],
+    }
+
+    result = load_tickers_from_dict(raw)
+
+    assert result["equities"] == ["SPY", "XLU", "XLE"]  # first-seen order preserved
+    assert result["crypto"] == ["BTC/USD"]

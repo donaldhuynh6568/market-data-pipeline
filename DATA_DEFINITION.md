@@ -92,8 +92,8 @@ Same underlying idea as the futures volume-floor check (§11) — "does this
 move have real participation behind it" — but **calibrated to each symbol's
 own trailing history instead of one borrowed fixed number**. A 20,000-
 contract floor means something for MNQ; it means nothing for a stock like
-ASML, whose typical 5-minute volume is a small fraction of that. Defaults to
-the `large_cap` tickers (override with `--symbols`).
+ASML, whose typical 5-minute volume is a small fraction of that. Covers every symbol in
+the file by default, ETFs and crypto included (restrict with `--symbols`).
 
 **Baseline calculation:** for each bar, `baseline_volume` is the trailing
 rolling mean of the prior `--window` bars (default 20, ≈100 minutes) for
@@ -522,11 +522,11 @@ need `shares_outstanding` from this dataset times price already in
 
 | Dataset | Frequency | Notes |
 |---|---|---|
-| Price data | Daily bars | Configurable with `--days` |
-| Intraday price data | 1H/4H/5Min bars | `--timeframe`; separate files from the daily dataset |
+| Price data | Daily bars | `--days` sizes a first run or new ticker; later runs append only new bars (`--full` rebuilds) |
+| Intraday price data | 1H/4H/5Min bars | `--timeframe`; separate files from the daily dataset; appended incrementally like daily |
 | Swing structure | Derived on-demand from intraday bars | Not a separate collection frequency of its own |
 | Equity volume-floor check | Derived on-demand from 5-minute bars | Per-symbol baseline, not a separate collection frequency |
-| Options snapshot | Daily collection pass | Uses moneyness and expiry filters |
+| Options snapshot | Daily collection pass | Uses moneyness and expiry filters; each day is appended (last 90 days kept), readers use the latest snapshot |
 | COT positioning data | Weekly or report-based | Complementary positioning signal for metals markets |
 | GEX | Derived on-demand from the latest options snapshot | Not a separate collection frequency of its own |
 | FRED | Daily/weekly/monthly/quarterly, per series | Latest value only, no vintage tracking |
@@ -595,7 +595,315 @@ Tabs: `Summary & Ratings`, `Momentum & Delta` (full ranked universe, cash-like e
 - **Storage:** each run appends to the file and keeps one row per (id, ticker), preferring the latest `updated_at`; rows older than `--keep-days` (90) are pruned. `--days` (7) and `--limit` (50 per ticker; alpaca-py pages internally) control each fetch. Newest coverage is uneven: quiet weekends and less-followed names return few articles.
 - **In the confluence report:** a `News` column shows up to 3 headlines from the last 7 days before the newest article (headlines naming the asset first, then MEDIUM ones), and the header shows how far the news goes. When a BUY/WATCH has a headline that names the asset and matches a negative keyword (or a SELL / AVOID has one matching a positive keyword) the cell starts with `REVIEW NEWS: ...`. The keyword lists are in the rules file. This is a keyword screen, not sentiment analysis, and ratings and targets never change.
 
-## 23) How this should evolve
+## 23) Location levels (entry, stop, target)
+
+`market_data_pipeline/transforms/location.py` reads daily bars from `price_data.parquet` and writes
+`data/location_levels.parquet` (sheet `Location Levels`, one row per symbol) and `data/location_zones.parquet`
+(sheet `Location Zones`, every detected zone). It implements the price-action rules in
+`reference/Location Confluence Playbook.md`, which until now were documented but not built
+(`location.status` in `reference/orderflow_strategy_rules.yaml`). Everything is arithmetic on daily bars: no
+intraday data, no confirmation layer, and no tracking of real open positions.
+
+### Dealing range
+The last confirmed swing low to the last confirmed swing high, using the same `find_swing_points()` helper as the
+intraday swing structure (3 bars each side). The range is graded into quadrants: `range_ce` is the 50% midpoint,
+`range_ote` the 3/4 completion reference, and `spot_pos_in_range` says where price sits inside it. A value above 1
+means price has broken out above the range, in which case CE and OTE sit below spot and cannot be targets - the
+options-derived wall carries the target instead.
+
+### Zones (fair value gaps)
+A three-candle imbalance: for support, candle 1's high below candle 3's low, with the zone spanning those two
+prices. `candle1_stop` is candle 1's low (the bar *before* the imbalance), which is where the stop goes - not the
+zone's own boundary. A zone is `filled` once a later bar trades fully through it; a bar that only dips in leaves it
+live, since the playbook treats unfilled gaps as standing reference levels. Each zone is then graded on two
+independent qualifiers.
+
+- `has_displacement` is the playbook's own test: the middle candle's body exceeded `displacement_atr_mult` x ATR(14)
+  *and* it broke the prior 5 bars' extreme.
+- `has_volume_confirmation` is an addition, **not** an ICT concept - none of the source transcripts framed
+  displacement in volume terms. It means the same candle's `volume_ratio` reached `volume_confirm_mult`, where the
+  ratio is the candle's volume over the mean of the previous `volume_baseline_window` bars. The baseline excludes
+  the candle itself (the same convention as the volume floor below), otherwise a spike partly absorbs itself into
+  the average it is measured against.
+
+`zone_quality` combines them: `STRONG` clears both, `CONFIRMED` clears one, `PLAIN` clears neither. They overlap
+only partly - on current data 62 of 365 zones clear displacement and 57 clear volume, but only 25 clear both - so a
+CONFIRMED zone backed by volume alone is real evidence, just weaker than a STRONG one. Neither is a hard filter:
+entry selection prefers the best quality available among zones within `max_pullback_pct` of spot, and falls back to
+the nearest zone otherwise. Quality is weighed only inside that band, so a textbook zone 30% below spot never beats
+a workable one 2% below.
+
+### Entry, stop and target
+- **Entry** is the zone's near edge (`zone_high` for a long) - the playbook's "enter at the edge, not the midpoint".
+  The `Zone` column on the Summary tab reports the chosen zone's quality, so it is visible whether an entry rests on
+  a confirmed zone or a common gap.
+- **Stop** is `candle1_stop`. This runs wider than an ATR stop would; `risk_pct` reports how much wider, and
+  `Stop ATRs` reports the same distance divided by ATR(14). Risk % is not comparable between names - 2% is a wide
+  stop on a quiet ETF and noise on a volatile chip stock - whereas Stop ATRs puts every name on one scale. Values
+  below `min_stop_atr` (default 1.5) are highlighted: the stop sits inside a single normal day's movement, so
+  ordinary churn takes it out before the idea has been tested. Note the tension with zone quality - a STRONG zone
+  comes from a large displacement candle, so its candle-1 stop is naturally further away and its R:R naturally
+  worse. Compare R:R only between names with similar Stop ATRs.
+- **Target** is whichever reference sits nearest above both entry and spot: CE, OTE, the range high, an untested
+  ("smooth") swing high, the gamma wall, or the OI cluster. The `Target From` column names which one was used.
+  CE (50%) is the conservative first target to partial into and OTE (75%) the completion reference, so a name
+  trading below its midpoint targets CE and steps up to OTE once through it. A level price has already traded
+  through is never offered, which is why names that have broken out above their range skip CE and OTE entirely.
+- **R:R** is `(target - entry) / (entry - stop)`, written into the workbook as a live formula so editing entry or
+  stop recalculates it.
+- **Size** risks `sizing.risk_per_trade_pct` of `sizing.account_size` between entry and stop, capped at
+  `sizing.max_position_pct` of the account. Whole units, or fractional to 4dp when one unit already exceeds the
+  risk budget (BTC). Set `account_size` in `confluence_report_rules.yaml` to your real number; nothing else reads it.
+
+### What the two-year backtest changed (2026-09-29)
+
+The first backtest ran on ~90 days and concluded the zone entries lost money at every reward target. Deepening the
+daily history to two years (22,420 bars, 3,988 zone trades instead of 338) reversed several of those readings, and
+three things changed as a result.
+
+- **Momentum now drives position size.** Score above 0.2 returned **+0.210R** (n=752), 0 to 0.2 **+0.028R**,
+  negative **-0.194R** — monotonic and well sampled. It is the one feature that has ordered outcomes consistently,
+  so it sets the base size tier rather than acting as one demerit among several.
+- **Zone quality no longer changes size.** Crossed against momentum quintiles it does not order: in the top
+  quintile PLAIN (+0.225R) beat CONFIRMED (+0.108R), and in Q3 PLAIN beat CONFIRMED again. Its apparent marginal
+  edge was riding momentum. Quality is still shown, because it is how the entry and stop get placed, but sizing on
+  it would be sizing on noise.
+- **The stop threshold moved from 1.5 to 1.0 ATR.** Only stops under 1 ATR were clearly bad (-0.114R, n=1350);
+  between 1.0 and 2.5 the effect is flat (-0.002R and -0.009R). The old 1.5 cutoff was penalising setups that
+  measured fine.
+
+Also worth knowing: **the overall picture is far less bleak than the 90-day run suggested.** All zones at 1R now
+score -0.039R rather than -0.224R, and at 2R and 3R they are positive (+0.004R, +0.052R) — widening the target
+helps, the opposite of the earlier finding. The random control still beats the average zone entry (+0.141R), but
+zone entries taken on high-momentum names beat the control. **Displacement is dead**: -0.036R with it versus
+-0.039R without, on 3,943 trades. It has no effect and never did.
+
+These rules are **provisional**. Two years across one bull-dominated stretch is better than three months but it is
+not proof, and the report says so on both the Daily Read and the Backtest tab.
+
+### Backtest: has any of this worked?
+
+`market_data_pipeline/transforms/backtest.py` scores the pipeline's own signals against the daily bars collected
+so far and writes `backtest_zone_trades.parquet` (one row per historical trade), `backtest_summary.parquet` (the
+scorecard) and `backtest_momentum.parquet`. It reads only `price_data.parquet`, so it re-runs with the daily
+refresh and its sample grows every day.
+
+**Zone trades.** Every bullish zone in history, entered at the near edge the first time price trades back into it,
+stopped at candle 1 - exactly the rule the report reports. Each trade is resolved at 0.5R, 1R, 1.5R, 2R and 3R.
+A bar that spans both the stop and the target counts as a **loss**: daily bars cannot say which came first, and
+assuming the good outcome is how a backtest flatters itself.
+
+**Expectancy** is R per trade (`win_rate x reward - loss_rate`). Positive makes money, negative loses it. The
+**random-entry control** is the bar any signal has to clear, because a signal worse than random is worse than no
+signal. Its stop widths are **sampled from the distribution the signal itself used**, and the median is printed in
+the bucket label. A fixed stop width is not a like-for-like comparison: tighter stops get hit more often whatever
+the entry, so an earlier fixed 1.5-ATR control overstated the zones' underperformance by roughly 28%.
+
+The **"Momentum quintile x Zone quality"** view is the one that decides whether a second feature earns anything
+once momentum is held fixed. Marginal buckets can order convincingly and still be worthless in combination, so any
+change to ranking or sizing gets justified against the crossed view rather than the one-feature tables.
+
+**Momentum** is scored separately, on non-overlapping windows only. Overlapping windows inflate the sample and
+manufacture signal that is not there; with 60-90 bars per name there are only a few hundred genuinely independent
+observations, and the table reports that count.
+
+Only price-derived features can be tested: the options layers (GEX regime, walls) are a daily snapshot with no
+history, so nothing in the report that depends on them has been validated at all.
+
+**Standing caveats:** a few months in one regime, trades clustered by name and date so they are far from
+independent, no transaction costs, and the mechanical entry tested in isolation from the discretion the playbook
+assumes. Treat the scorecard as a sample, not a verdict.
+
+### Backtest: the ICT target-exit test (2026-10-01) - what Rank is actually built on
+
+The scorecard above resolves every trade against a synthetic R-multiple (0.5R, 1R, 2R, 3R...) - useful for asking
+"how far should a target sit", but it is not the question that matters for a position meant to be held to a key
+level: does price actually get there. `run_target_backtest()` (same module) answers that directly. Same zones, same
+entry/stop, but each one is resolved against the real level a live plan would have offered at that moment - CE,
+OTE, the dealing-range high, or the nearest smooth swing high, whichever sat nearest above price - computed
+point-in-time from only the bars on record by then, the same no-lookahead discipline as everything else here. GEX
+wall / OI-cluster targets are excluded: those are a same-day options snapshot with no history, so there is nothing
+to reconstruct at a past bar. Writes `backtest_target_trades.parquet` and `backtest_target_summary.parquet`.
+
+Because the reward varies trade to trade (whatever the real level happened to be, not one fixed multiple),
+expectancy here is the mean of each trade's own realized R - the target's reward multiple when it won, -1R when the
+stop came first - rather than `win_rate x one reward`. The control is matched on both stop **and** reward,
+sampling each from the zones' own observed distributions, for the same reason the original control matches stops:
+a control that targets differently than the signal is not a fair fight.
+
+**This backtest, not the R-multiple one above it, is what `Past edge` and `Rank` on the Summary tab are built on**
+(`reports/daily_read.py`'s `historical_edge`). Concretely it averages whichever of these the setup falls into:
+
+- `Momentum at entry (to target)` - the same momentum bands as everywhere else in this pipeline.
+- `Zone quality (to target)` - STRONG/CONFIRMED/PLAIN. Re-included in ranking here: the question "does zone quality
+  matter" is more honestly asked against a real exit than a synthetic one, and the first run of this test puts
+  STRONG at +0.238R (n=9, too small to lean on hard, but not zero).
+- `Weak close on entry (to target)` - the live `zone_status` read maps onto this: a FAILED entry zone (the chosen
+  level has already shown a body-close through its midpoint - see "Zone status" above) reads as the weak/"True"
+  bucket, RESPECTED as the clean/"False" one. UNTESTED/FILLED have no equivalent bucket in the backtest (it only
+  ever measures the very first touch) and are skipped rather than forced into one. On the first run this remains
+  the standout: clean +0.175R vs weak -0.534R.
+
+**Stop width plays no part in this at all**, by design - it is a risk-sizing input (how big a position to take,
+still handled by the Funnel's stop-width demerit) not a reason one setup should out-rank another. Ranking now rests
+entirely on momentum plays and the ICT read, per the measured target-exit result rather than the fixed-R one.
+
+### Reading the Summary tab
+
+The Summary is the daily read, and the only sheet you need to open. Fifteen columns, in the order you use them:
+
+- **Rank / Ticker / Read** - rank is by `Past edge`, best first; `Read` is one sentence on the technical picture,
+  e.g. "Momentum building into a strong level, stop has room; unstable options regime".
+- **MOMENTUM** - `Trend` (Speeding up / Mixed / Slowing down) and `Score`. Is it moving?
+- **LEVELS (ICT)** - `Level` (Strong / Medium / Weak), `Buy at`, `Stop`, `Target`, `Stop room`. Where would you act?
+- **RISK** - `Shares`, `Cost $`, `Risk $`, `Reward:Risk`. What would it cost?
+- **EVIDENCE** - `Past edge`: the average measured expectancy of the ICT target-exit backtest buckets this setup
+  falls into - momentum and the ICT read, never stop width (see "the ICT target-exit test" above) - with the
+  smallest supporting sample, e.g. `-0.11R (n>=68)`. Green when positive, red when not.
+
+**The sheet describes and ranks; it does not instruct.** There is no "buy" column, because no signal here has yet
+shown an edge that would justify one. `Past edge` is measured, not predicted, and it is an average of buckets -
+not a forecast for that name.
+
+Names with no level to trade against carry no edge and rank last. The raw technicals - the rating waterfall, GEX
+regime, 1H/4H structure, setup state, Risk %, target source, insider and news - are on the **Detail** tab.
+
+### The funnel: from universe to position size
+
+The Summary tab is ordered so that reading left to right walks the decision, and the **Funnel** tab shows the same
+walk gate by gate. Stages run in order and the first hard gate wins, the same first-match-wins shape as the rating
+waterfall:
+
+| Stage | What it asks | Hard gate? |
+|---|---|---|
+| `DELTA` | Is momentum still building? | Yes - DECELERATING is SKIP |
+| `RATING` | Does the waterfall say BUY? | Yes - SELL is SKIP, anything else is WATCH |
+| `REGIME` | How hard should this be leaned into? | No - demerit |
+| `SETUP` | Is there a live level to enter on? | Yes - NO_SETUP / RESISTANCE_ONLY is SKIP, EXTENDED is WATCH |
+| `ZONE` | Is there evidence the level holds? | No - a PLAIN zone is a demerit |
+| `STOP` | Is the stop outside daily noise? | No - under `min_stop_atr` is a demerit |
+| `RR` | Does the reward justify the risk? | No - R:R ranks, it never rejects |
+| `FLAGS` | Anything independent arguing against? | No - insider clusters and news flags are demerits |
+
+`Stage` on the Detail tab records which test a name failed first: `DELTA` (momentum), `RATING` (the waterfall),
+`SETUP` (nothing to enter on), or `CLEARED` for a name that passed every test. The Summary says the same thing in
+words instead, under `Why`.
+
+A **hard gate** stops the name and `Stage` records where. Everything else is a **demerit**, which halves the
+suggested size (`demerit_multiplier`, floored at `min_multiplier`) rather than overriding an earlier stage - the
+rule is scale down, never override. `Action` maps from what survives: 1.0 FULL, 0.5 HALF, 0.25 QUARTER, below
+that MINIMAL. The `Why` column lists the demerits applied.
+
+Two consequences worth knowing. The regime demerit is currently unreachable for a BUY, because `rating_rules.rate()`
+already blocks NEAR_FLIP and NEGATIVE_GAMMA from reaching BUY - it is kept so the funnel stays correct if those
+rules change. And because a STRONG zone comes from a large displacement candle, its stop is naturally wider and its
+R:R naturally worse, so it is entirely normal for no name to reach FULL; the Funnel tab says so outright when that
+is the case.
+
+### Sizing in dollars
+
+`Size` is units, `Position $` is `entry x size` (capital deployed) and `Risk $` is `(entry - stop) x size` (what a
+stop-out costs). On the Summary all three are **post-demerit**; the Funnel tab shows the full-risk figures beside
+them. A name stopped at a hard gate shows no size at all rather than a position of zero. A size cut never rounds down to
+nothing either: one unit is the floor, so "buy quarter" always has something to buy, and `Risk $` reports what that
+single unit actually risks.
+
+`Risk $` coming in under the per-trade budget is not an error - it means the `max_position_pct` cap bound before
+the risk budget did, which happens on tight-stop names. Account inputs come from `ACCOUNT_SIZE`,
+`RISK_PER_TRADE_PCT` and `MAX_POSITION_PCT` in `.env`, falling back to the `sizing:` block in
+`confluence_report_rules.yaml` and then to built-in defaults, so the real number need not be committed. Every
+dollar column scales directly off `account_size`.
+
+### Setup states
+`AT_ENTRY` (price is in the zone), `WAIT_PULLBACK` (the zone is below spot but within `max_pullback_pct`),
+`EXTENDED` (the nearest zone is further below than that - structure exists, but chasing here is not the plan),
+`NO_SETUP` (no live support zone), `RESISTANCE_ONLY` (a SELL / AVOID name, which gets overhead supply only and no
+trade), `NO_LEVELS` (the symbol is absent from the levels file).
+
+### Smooth vs jagged
+A swing level stays `SMOOTH` (untested liquidity, still a draw) until a later bar trades through it, after which it
+is `JAGGED` and stops being a target. `nearest_smooth_high` feeds target selection.
+
+### Zone status (body-vs-wick respect test)
+From `reference/Location Confluence Playbook.md` (source 6): a wick is allowed to pierce into a zone's far half once
+price has traded back into it - that alone does not invalidate the zone. What matters is the candle **body**: if a
+later bar's close goes past the zone's midpoint, the zone is read as failed even though it may not be `filled` yet
+(price has not fully cleared the far edge). This is an earlier, softer warning than `filled`.
+
+`zone_status` on each row of `location_zones.parquet` is one of `UNTESTED` (price has not traded back into the zone
+since it formed), `RESPECTED` (it has, and every close since has stayed on the entry side of the midpoint), `FAILED`
+(a close has gone past the midpoint), or `FILLED` (the existing, stricter condition). `entry_zone_status` on
+`location_levels.parquet` carries this for the chosen entry zone specifically, and the Key Levels tab's `Status`
+column shows it for every live zone, with `FAILED` highlighted. **Selecting an entry only excludes `filled` zones**,
+so a name can be trading from a zone that already reads `FAILED` by this stricter test - when that happens the Daily
+Read says so ("this level already had a close back through its midpoint") rather than only the Status column
+carrying it.
+
+Measured on the backtest (`transforms/backtest.py`'s point-in-time version, `weak_entry_close`: does the entry
+bar's own close sit past the zone's midpoint, using only same-day information so it stays free of lookahead): a
+clean entry close returned **+0.141R**, a weak one **-0.642R** (n=163 / 134) at a fixed 1R target - see the Backtest
+tab's "Weak close on entry bar @ 1R" view. The same point-in-time feature is also measured in the ICT target-exit
+backtest ("the ICT target-exit test" above), where it remains the standout result and is one of the three things
+`Past edge`/`Rank` actually average - see that section for the current numbers.
+
+### Inside day
+`inside_day` on each name's levels row is `CLASSIC` when the most recent bar's full range sits inside the prior
+bar's range, `BODY_ONLY` when only its body (open/close) does while the wicks extend beyond it, or `None`
+otherwise (reference doc, sources 7/8). Read as compression ahead of an expansion move; shown on the Key Levels
+tab's header line for each name. Informational only - which direction the expansion goes is read from the zone and
+momentum picture elsewhere, not guessed from the inside day alone, and it does not feed the rating or sizing.
+
+### Two things the reference doc update flagged that were deliberately left alone
+- **The swing-point definition.** The doc's "formal 3-candle swing" (sources 7/8) requires only 1 bar on each side
+  (a candle whose high/low beats its immediate neighbor); this pipeline's `swing_window` requires 3. The looser
+  definition fires on far more, less significant pivots. Not switched to match it - that would change the dealing
+  range, the smooth/jagged read and every backtested zone at once, and nothing has measured whether it helps.
+- **Fixed target vs. trailing stop.** The doc itself flags an unresolved conflict: one source argues against a
+  fixed OTE/CE target entirely, favoring a trailing stop with no predetermined take-profit, on its own data that
+  most winners kept running past target. `select_target` still resolves to a fixed price. The doc leaves the
+  choice to the user; it has not been made, and `position_levels.py` says so at the point where it matters.
+
+### Caveats
+Swing confirmation lags by the swing window, so the last few days cannot anchor a range and a fast trend leaves the
+range stale. Equities carry about 62 daily bars and crypto 90, enough for the 25-day scan but thin for more. These
+are candidate levels for names the ranking already selected: they never change a rating, and the pipeline still has
+no position tracking, so nothing here knows what you actually hold.
+
+### Positioning screen and ICT levels (Summary tab)
+
+The Summary tab is a positioning screen. Step 1 gates on trend and momentum: the 4H swing structure sets the direction
+and the momentum score must agree (uptrend + positive = LONG, downtrend + negative = SHORT, else NO TREND). Step 2 runs
+nine layers only for names that pass, each voting + / - / 0 / n/a against that direction: 1H structure, momentum delta,
+gamma regime, call-wall room (long only), spot vs the opens, last completed day's volume, speculator COT (metals only,
+mapped by `positioning.cot_markets`), perp funding (crypto, one snapshot) and insider/news flags (against only). Step 3
+is conviction: agree minus against over the layers that have data, HIGH at >= 4, MEDIUM at >= 2. Logic is in
+`reports/positioning.py`; thresholds are the `positioning:` block of `confluence_report_rules.yaml`. None of it is
+backtested and none of it changes rating, size or the measured-edge rank. Sort order is screen pass, conviction, rank.
+
+`transforms/ict_levels.py` writes `data/ict_levels.parquet` (one row per symbol) from the 5m and 1H bars: midnight, 8:30
+and 9:30 New York opens, weekly and monthly opens, the last completed Asia (20:00-24:00 ET) and London (02:00-05:00 ET)
+highs/lows with a SWEPT/UNTESTED flag, the nearest untouched equal highs/lows (1H swing points within `eq_atr_mult` of
+1H ATR), and last-day relative volume. Equities have no overnight bars, so their midnight open and Asia/London ranges
+are blank (`min_session_coverage`). Run it before the report: `uv run python -m market_data_pipeline.transforms.ict_levels`.
+The ICT Levels tab lists every level against spot in %, ATRs and side.
+
+### Flow indicators (Summary tab, shown beside conviction)
+
+`transforms/flow_indicators.py` writes `data/flow_indicators.parquet` (one row per symbol): CMF (20), MFI (14) and an OBV-vs-price
+divergence signal from the daily bars; relative strength against a benchmark (SPY, or BTC/USD for other crypto; `flow.benchmarks`
+overrides); the 5-day vs 60-day average trade size (volume / `trade_count`); anchored VWAPs from the weekly open, monthly open and
+the last 1H swing low / high; and the POC and value area (70%) of the last 20 sessions of 5m bars. The latest daily bar is the day in
+progress, and equity VWAP/profile include extended-hours bars. Each indicator becomes a +/-/0/n-a vote in `reports/positioning.py`
+(thresholds under `positioning:` in the rules file) and the Summary's FLOW group counts them as `agree / against`. They are not part
+of the HIGH/MEDIUM/LOW conviction and do not change rating, size or rank. CMF, MFI and OBV all derive from the same OHLCV, so they are one
+family of evidence, not three.
+
+`transforms/flow_backtest.py` scores the five daily votes point-in-time against 5/10/20-day forward returns (non-overlapping windows,
+direction set by the momentum-score sign) and writes `flow_backtest.parquet`, which adds a Flow Backtest tab. VWAP and the volume profile
+are not backtested. The sample is about two years of mostly rising markets with names that move together and no costs: treat small gaps
+as noise.
+
+## 24) How this should evolve
 
 This project is intentionally designed so these definitions can be changed without rewriting the whole pipeline.
 
@@ -618,7 +926,9 @@ If the logic changes later, the places most likely to be updated are:
 - `market_data_pipeline/transforms/momentum.py` for the score/delta definition, vol floor, momentum windows, and smoothing span
 - `market_data_pipeline/collectors/perps.py` for perp venues and symbol mapping
 - `market_data_pipeline/collectors/deribit_options.py` for crypto option filtering and the Deribit-to-GEX mapping
+- `market_data_pipeline/reports/funnel.py` for the stage order, which gates are hard, and the demerit multiplier
 - `confluence_report_rules.yaml` and `market_data_pipeline/reports/` for the confluence report's rating rules, target selection, note templates, insider flag and news keywords
+- `market_data_pipeline/transforms/location.py` for the dealing range, zone detection and entry/stop mechanics; `market_data_pipeline/reports/position_levels.py` for target selection, R:R and sizing
 - `market_data_pipeline/collectors/news.py` for news relevance rules; `market_data_pipeline/picks.py` for how the picks list is built
 - `market_data_pipeline/combine.py` for workbook structure and sheet output
 

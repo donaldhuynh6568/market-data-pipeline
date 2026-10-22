@@ -6,28 +6,71 @@
 # mirrors it as structured fields for eventual code use.
 
 source:
-  origin: "four livestream transcripts: (1) discretionary trader, suspension-block/quadrant/FVG framework, not ICT proper but overlapping vocabulary; (2)-(4) ICT-proper vocabulary (sessions, kill zones, displacement, PD arrays, dealing range/OTE)"
+  origin: "eight livestream transcripts: (1) discretionary trader, suspension-block/quadrant/FVG framework, not ICT proper but overlapping vocabulary; (2)-(4) ICT-proper vocabulary (sessions, kill zones, displacement, PD arrays, dealing range/OTE); (5) heavily promotional free-course video (prop-firm payout flexes, paid mentorship pitch) - technical content mostly consistent with ICT-proper, weighted slightly lower than sources 1-4; (6)-(8) live-account walkthroughs from a different, less promotional creator (father/son format) - genuinely ICT-proper, weighted same as sources 1-4"
   status: not_built
   blocking_note: "mirrors location.status: not_built in orderflow_strategy_rules.yaml"
   core_purpose: "map untested liquidity before a session starts (time first), require displacement to confirm price is moving to claim it (price second), build bias in advance rather than reacting"
+  open_conflict: "source 5 argues against a fixed OTE/CE target, favoring a trailing stop with no predetermined take-profit (let winners run until stopped out). Not resolved against target_ote_not_just_ce below - left as an explicit open decision, see playbook."
 
 quick_reference_walkthrough:
   # mirrors playbook section 0 - the minimum sequence to get a stop and target
   three_tools: ["liquidity (where price draws to)", "risk framing (where the stop goes)", "one entry mechanism (how entry is timed)"]
   steps:
-    - "define the dealing range (high/low bounding the move of interest)"
-    - "classify recent highs/lows inside it as smooth (untested) or jagged (already swept)"
-    - "apply decision_hierarchy to find which level to grade"
-    - "require displacement before treating a gap as a real FVG"
-    - "entry = FVG near edge, not a deeper CE fill"
+    - "define the dealing range (high/low bounding the move of interest), using swing_high_low_definition for the exact boundary bar"
+    - "classify recent highs/lows inside it as smooth (untested) or jagged (already swept); use smoothest_candidate_tiebreaker when ambiguous"
+    - "apply decision_hierarchy to find which level to grade; check liquidity_run_condition on the path to it"
+    - "require displacement before treating a gap as a real FVG; prefer a break_in_structure_gap over an ordinary FVG when both are present"
+    - "entry = FVG near edge (or inflection_point for a BSG), not a deeper CE fill, or sharp_reversal_entry when a pullback is unlikely; confirm zone is holding with body_vs_wick_respect_test"
     - "stop = candle 1 low (bullish) / high (bearish)"
-    - "target = OTE (75% of dealing range) as primary; CE (50%) as conservative interim; full extreme as stretch only"
+    - "target = OTE (75% of dealing range) as primary; CE (50%) as conservative interim; full extreme as stretch only (see source.open_conflict)"
     - "commit to one entry mechanism per setup; do not model-hop mid-session"
+    - "gate every PD array with key_level_timing_principle before acting on it"
 
 definitions:
   dealing_range:
     rule: "the high and low bounding the price action being analyzed: a recent swing high/low, a session range, or a suspension block"
     generalizes: "suspension_block and session_range are specific cases of this"
+  swing_high_low_definition:
+    source: [7, 8]
+    rule: "a swing high is a candle whose high is greater than the high of the candle immediately before AND immediately after it (mirror rule for swing low: lower than both neighbors)"
+    use: "resolves 'the recent swing high/low' to one specific bar rather than a general area; apply wherever dealing_range or daily_stop_target_workflow needs an exact boundary"
+  inside_day:
+    source: [7, 8]
+    variants:
+      classic: "today's full range (high and low, wick to wick) is entirely contained inside yesterday's range"
+      body_only: "only today's candle body (open/close) sits inside yesterday's range; wicks may extend beyond it - looser, more permissive, fires more often and is less decisive than the classic variant"
+    rule: "a single-candle compression signal read as a precursor to an expansion/release move away from the inside day's range"
+    direction_read: "use the same liquidity-draw/displacement logic as the rest of this file to read the expansion's direction, not an independent guess"
+  liquidity_run_condition:
+    source: [7, 8]
+    rule: "classifies how much opposing structure sits between current price and a liquidity target"
+    low_resistance: "little opposing structure (few stacked highs/lows, order blocks, PD arrays) between price and target - expect a fast, clean move"
+    high_resistance: "multiple stacked levels on the way - expect a choppier, slower move that may stall or reverse before reaching target even with correct directional bias"
+    use: "a context/regime read applied before sizing confidence in a move; pair with decision_hierarchy and displacement_required, not a standalone trigger"
+  rejection_block:
+    source: [7, 8]
+    rule: "formed when price wicks aggressively through a level (sweeping liquidity) but the body closes back on the other side, leaving a cluster of large rejecting wicks at that level"
+    reference_level: "the high (bearish rejection) or low (bullish rejection) of the rejecting wick cluster"
+    use: "a PD-array/re-entry reference distinct from order_block and fair_value_gap; a return to it is a re-entry opportunity in the direction of the original rejection, not a signal to fade it"
+  sharp_reversal_entry:
+    source: [7, 8]
+    rule: "an alternative entry mechanism to the standard FVG-pullback entry (fvg_entry_stop_mechanics): enter on a stop or market order directly in the reversal's direction when the move is sharp/fast enough that waiting for a pullback into a PD array risks missing it entirely"
+    tradeoff: "accepts a worse average price in exchange for not missing moves that offer no retracement"
+    use: "a deliberate substitution when conditions call for it (low_resistance_run, a clear sweep-and-reverse) - not a default replacement for the standard pullback entry"
+  judas_swing:
+    source: [7, 8]
+    rule: "the named ICT term for the pre-open (or pre-main-move) liquidity-sweep fakeout: price sweeps one side's liquidity to trap the wrong-side breakout, then reverses hard in the opposite direction for the real move"
+    relation: "same mechanic as premarket_characterization_source_6 under session_vs_kill_zone below, now given its standard name - use the swept side as the tell for the real move's likely direction"
+  key_level_timing_principle:
+    source: [7, 8]
+    rule: "generalizes a principle already stated narrowly for change_in_state_of_delivery: a PD array (FVG, order_block, rejection_block, BSG) only matters when it sits at a genuine key level (a dealing-range boundary, session high/low, swept liquidity pool) AND the timing is right (a kill zone, session open, a moment liquidity is actively being sought)"
+    use: "apply as a cross-cutting filter on every PD array in this file, not just the ones it was originally stated for; same logic behind scoping smt_divergence to liquidity-run moments"
+    is_a_build_item: false
+  internal_external_range_liquidity:
+    source: 5
+    rule: "IRL (internal range liquidity) = levels inside a defined range between a swing high and swing low, mainly FVGs/PD arrays. ERL (external range liquidity) = the range's own highs/lows, the boundary itself"
+    stated_pattern: "price consistently moves from IRL to ERL: trades into an internal FVG, continues to the external range high/low, which becomes internal to the next range, repeating"
+    note: "terminology only - no new mechanic beyond dealing_range/smooth_vs_jagged already defined here"
   ote_three_quarter_rule:
     rule: "3/4 of the dealing range (measured from the range's origin toward its target side) is the higher-confidence completion reference for a directional move"
     distinct_from: "CE (50%), which is the conservative/first target, not the completion reference"
@@ -37,6 +80,34 @@ definitions:
   fair_value_gap:
     rule: "3-candle imbalance: candle 1 wick vs candle 3 wick, candle 2 range does not overlap"
     candle_roles: {1: "pre-imbalance candle", 2: "imbalance candle", 3: "closes and frames the imbalance"}
+  break_in_structure_gap:
+    source: 5
+    rule: "an FVG that displaces through multiple prior highs/lows at once (not just one) - shows aggressive, uncontested pressure through a whole stretch of structure"
+    probability: "higher than an ordinary single-level FVG"
+    relation: "a subtype of fair_value_gap, not a separate detection - apply after displacement is already confirmed"
+  inflection_point:
+    source: 5
+    note: "coined by source 5, not an ICT-standard term"
+    rule: "within a break_in_structure_gap, the sub-level where the trapped side of the market (breakout buyers/sellers, or stops moved to breakeven as the move ran) has the heaviest order concentration"
+    use: "preferred entry reference over the plain FVG near edge when trading back into a BSG specifically"
+  body_vs_wick_respect_test:
+    source: 6
+    rule: "once price has traded back into a zone (FVG or order block), a wick may pierce into the far half without invalidating it. What matters is the candle body: staying on the entry side of the zone's midpoint means the zone is still holding. A candle body closing past the midpoint is the tell the zone has failed"
+    use: "an ongoing post-entry validity check, not an entry trigger itself - apply after entry mechanics (fvg_entry_stop_mechanics) have already placed the trade"
+  immediate_rebalance:
+    source: 6
+    rule: "when a candle opens inside an unfilled FVG/inefficiency and its very next close fully fills that gap in one pass (not partially, not over several candles), that fast complete fill is read as the strongest available directional tell"
+    expected_outcome: "the move either happens immediately on that same candle, or on the very next one"
+    relation: "a stronger, more specific case of gaps_as_magnets - not just that the gap gets revisited, but that a fast full fill is itself a directional signal"
+  counterparty_theory:
+    source: 6
+    rule: "explains the mechanism, not just the pattern, behind buy-side/sell-side liquidity elsewhere in this file: smart money needs a counterparty to fill a large position. Resting breakout buy-stops above an old high, or protective/breakout sell-stops below an old low, are that counterparty. Smart money sells into triggered buy-stops (or buys into triggered sell-stops), then aims for the inefficiency/gap between that entry and its actual opposing target"
+    use: "underlying logic statement, not a new detection rule - explains why liquidity pools function as smart-money entry zones"
+    is_a_build_item: false
+  smoothest_candidate_tiebreaker:
+    source: 6
+    rule: "when two relative-equal-high/low candidates are both plausible and it is genuinely ambiguous which to grade, default to whichever pair is cleanest/most obviously equal rather than the technically-arguable one (e.g. one with a messier, complicating higher-low nearby)"
+    purpose: "removes beginner paralysis over picking between two defensible candidates - not a claim that one is objectively correct over the other"
   common_gap_vs_fvg:
     rule: "a gap only counts as a tradable FVG/PD array if it shows displacement; a slow low-conviction gap with no directional force is a common gap and excluded"
     displacement_definition: "fast directional run through a prior high/low, ideally at a structurally meaningful time (kill-zone open)"
@@ -44,16 +115,17 @@ definitions:
     entry: "FVG's near edge; do not wait for a deeper fill at CE or beyond, price may tag the edge and run"
     stop_bullish: "candle 1's low"
     stop_bearish: "candle 1's high"
-    note: "stop is the pre-imbalance candle's extreme, not the FVG's own boundary"
+    note: "stop is the pre-imbalance candle's extreme, not the FVG's own boundary; see sharp_reversal_entry for the stated alternative when waiting for this pullback risks missing the move"
   decision_hierarchy:
     rule: "mutually exclusive 3-way choice per position/range, not a checklist requiring all to agree"
     steps:
       - "given higher-timeframe bias, check what recently happened: sell-side stop hunt, buy-side stop hunt, or neither"
       - "locate first imbalance in the return leg from that hunt"
-      - "classify the far level it is heading toward: single high/low, or relative-equal high/low (apply anchor-point + wick grading if it has a wick)"
+      - "classify the far level it is heading toward: single high/low, or relative-equal high/low (apply anchor-point + wick grading if it has a wick, or smoothest_candidate_tiebreaker if ambiguous)"
     confluence_note: "one clean setup (bias + displacement + graded level) is sufficient; order blocks, model 2022, COT, seasonality do not all need to agree simultaneously"
   gaps_as_magnets:
     rule: "FVGs and opening-range gaps (RTH, new-day, new-week) tend to get revisited even after price moves away for a while; treat unfilled gaps as standing reference levels, not one-time targets that expire"
+    persistence_note: "an RTH opening range gap can remain an active reference across multiple days, not just intraday (source 6 example: traded up into 5 sessions later)"
   one_model_at_a_time:
     rule: "pick a single entry mechanism per setup and wait for it; if it does not fire, do nothing rather than switching models mid-session"
   suspension_block:
@@ -69,6 +141,7 @@ definitions:
     wick_grading_refinement: "if the anchor candle has a wick, grade the wick into quadrants; price may only reach CE or lower quadrant before reversing, not the full level"
     weakness_signal: "failing to reach CE on approach indicates the move is exhausted"
     read_as: "resting liquidity pool, high-probability sweep target"
+    ambiguity_tiebreaker: "see smoothest_candidate_tiebreaker"
   session_vs_kill_zone:
     session_windows_et:
       asia: "19:00 - 05:00"
@@ -80,6 +153,8 @@ definitions:
       ny_open_kill_zone: "09:30 - 10:00"
     additional_reset_time_et: "08:30 (common economic-release time; behaves as a reset point whether or not news is scheduled that day)"
     rule: "scan the full session range for smooth highs/lows, not just the kill zone; kill zone is for timing entries, not limiting the liquidity search"
+    premarket_characterization_source_6: "pre-market (07:00-09:30 ET) is a liquidity-seeking window - tends to sweep one of two candidate liquidity pools before the open; whichever is swept first is read as the tell for which pool is the next draw once the day's real run begins"
+    named_as_judas_swing_sources_7_8: "this specific pre-open sweep-then-reverse pattern has a standard name - see judas_swing above; same mechanic, now named"
   smooth_vs_jagged:
     rule: "untested high/low with no repeated wicking through = smooth = highest-probability draw; once run through and reacted off, becomes jagged and stops being a target"
   turtle_soup:
@@ -91,12 +166,39 @@ definitions:
     rule: "last down-close candle before reversal through a swept relative-equal high/low"
     confirmation: "price returns to order block CE before continuing in sweep direction"
     validation: "require close beyond swept level, not just a wick through it"
+    alt_framing_source_5: "created whenever price shifts delivery with force and leaves behind a key level - same underlying idea, simpler wording"
+    related_but_distinct: "see rejection_block - formed by rejecting wicks rather than a pre-reversal candle body"
+  change_in_state_of_delivery:
+    source: 5
+    rule: "read off candle bodies, not wicks: price delivery = which side the market is seeking (bullish = highs, bearish = lows). A shift is signaled when a run of down-close bodies getting engulfed by up-close bodies flips (or the reverse)"
+    reasoning: "most of a candle's volume sits in the body; when price holds beyond where the bulk of the opposing side is positioned, that side is underwater and likely to exit, adding pressure in the new direction"
+    validity_gate: "only meaningful at a key level (dealing-range boundary, session high/low, BSG/inflection point) - a specific instance of the more general key_level_timing_principle above"
+  swing_failure_pattern:
+    source: 5
+    rule: "a candle wicks through a prior high/low but fails to close beyond it"
+    read_as: "earlier, more aggressive reversal signal than waiting for full displacement"
+    caution: "weakest, earliest signal in this doc - use combined with an inverted FVG or change_in_state_of_delivery, not alone"
+  smt_divergence:
+    source: 5
+    rule: "compare two correlated instruments at the same swing point; if one makes a new high/low the other fails to confirm, that is read as manipulation on the one that extended, and the divergence direction is favored"
+    requires: "a genuinely correlated pair - equity indices with each other, or a currency against its inverse"
+    candidate_pairs_in_universe: ["SPY/QQQ", "GLD/SLV"]
+    use: "added confluence alongside a graded level and displacement, not a standalone signal"
+    usage_caveat_sources_7_8: "only meaningful during an actual liquidity run or volatility injection - a session open, kill zone, or news release - not as a constant background check across quiet, low-volume stretches; scope to the same windows key_level_timing_principle calls for"
+  red_folder_news_timing:
+    source: 5
+    rule: "check an economic calendar (source names ForexFactory) before the session for high-impact releases: NFP, CPI, FOMC rate decisions specifically (not FOMC minutes, treated as much lower impact)"
+    expansion_read: "a red-folder day is more likely to be expansive/tradeable; no red-folder news argues for sizing down (choppier expectation)"
+    risk_note: "avoid holding an open position into a red-folder release - fast moves can slip through a stop before a counterparty exists to fill it at the intended price"
+    data_status: "external calendar lookup, not a pipeline data gap - buildable/usable regardless of collector status"
 
 confluence_rules:
   time_first_then_price:
     rule: "define dealing range/session and scan full extent for smooth highs/lows before considering lower timeframe; confirm with displacement before treating as tradable bias"
   displacement_required:
     rule: "require fast directional break of prior high/low before treating a gap as a real FVG"
+  prefer_bsg_over_plain_fvg:
+    rule: "when both are available, a break_in_structure_gap carries more weight than an ordinary FVG that only cleared one level; use its inflection_point as the primary entry reference when trading back into it"
   fvg_side_preference:
     rule: "when swing high has FVG on both left(buy) and right(sell) side, prefer left/buy-side FVG as target"
     reason: "acts as inversion FVG once price rotates lower through it"
@@ -106,30 +208,58 @@ confluence_rules:
   suspension_block_containment:
     rule: "while price is inside a suspension block or dealing range, expect repeated tests of both boundaries rather than clean trend"
     use: "range's own quadrant grading (CE, upper/lower quadrant, OTE at 3/4) for expected turning points"
+  inside_day_compression_filter:
+    source: [7, 8]
+    rule: "treat an inside_day (classic or body_only) as a signal to expect an expansion move away from its range; read the expansion's direction with the same liquidity-draw/displacement logic as any other setup"
+  check_liquidity_run_condition:
+    source: [7, 8]
+    rule: "before expecting a clean, fast move to a target, classify the path as a high_resistance or low_resistance liquidity_run_condition and calibrate expectations accordingly"
   order_block_confidence:
     higher_confidence_when: "far-side relative-equal level only slightly beyond near side (not an obvious/clean equal high-low)"
+  rejection_block_as_reentry:
+    source: [7, 8]
+    rule: "where a sweep leaves a cluster of rejecting wicks rather than a clean reversal candle, use the rejection_block the same way as an order_block - a return to it is a re-entry opportunity in the direction of the original rejection"
   anchor_point_wick_grading:
-    rule: "before assuming a relative-equal high/low fully sweeps, grade the anchor candle's wick; treat CE as the minimum bar for strength"
+    rule: "before assuming a relative-equal high/low fully sweeps, grade the anchor candle's wick; treat CE as the minimum bar for strength; use smoothest_candidate_tiebreaker when two candidates are ambiguous"
   enter_at_edge:
-    rule: "take FVG near edge as entry, not a limit order at CE waiting for a better fill"
+    rule: "take FVG near edge as entry, not a limit order at CE waiting for a better fill; apply body_vs_wick_respect_test on subsequent bars to confirm the zone is still holding; use sharp_reversal_entry instead when a pullback is unlikely to occur"
   stop_at_candle_1:
     rule: "initial stop is pre-imbalance candle's extreme (low for bullish, high for bearish)"
   target_ote_not_just_ce:
     rule: "treat 3/4 of the dealing range (OTE) as the primary completion reference; CE is a conservative interim target to partial into, not the finish line"
+    conflict: "see source.open_conflict - source 5 argues against a fixed target entirely"
   one_model_at_a_time:
     rule: "commit to a single entry mechanism per setup; do not require every PD array to agree or switch models mid-session"
+  key_level_timing_gate:
+    source: [7, 8]
+    rule: "apply key_level_timing_principle across every PD array in this file (FVG, order_block, rejection_block, BSG) - a PD array away from a genuine key level, or appearing outside a window when liquidity is actively being sought, carries materially less weight"
+  watch_for_judas_swing:
+    source: [7, 8]
+    rule: "be alert to a pre-open (or pre-main-move) judas_swing liquidity sweep designed to trap the wrong-side breakout before the real reversal; use the swept side as the tell for the likely direction of the actual move"
+  early_confirmation_sfp_and_delivery_shift:
+    rule: "at a key level, a swing_failure_pattern or a change_in_state_of_delivery can be used as earlier, more aggressive confirmation than waiting for full displacement - best combined with each other or an inverted FVG, not relied on alone"
+  smt_divergence_as_confluence:
+    rule: "when a correlated pair diverges at a swing point during an actual liquidity run or volatility injection (session open, kill zone, news release), treat the instrument that failed to confirm the extreme as showing the higher-probability direction; use as added confluence alongside a graded level and displacement, not standalone"
+  check_red_folder_news:
+    rule: "look up NFP/CPI/FOMC rate-decision timing before trading; size down on days without red-folder news; avoid holding into a release"
+  immediate_rebalance_as_stronger_signal:
+    rule: "a candle that opens inside an unfilled FVG and immediately fully fills it in one pass is a stronger directional tell than an ordinary gap revisit; expect the move on that candle or the very next one"
+  sanity_check_liquidity_with_counterparty_theory:
+    rule: "before treating a swept high/low as a smart-money entry zone, confirm there is a real reason for it to function as a counterparty (resting breakout or protective stops), not just assume every sweep qualifies"
 
 opening_range_half_gap:
   status: not_built
-  blocking_gap: "no RTH open print; collectors/price.py only pulls TimeFrame.Day"
+  blocking_gap: "no RTH open print universe-wide; collectors/price.py only pulls TimeFrame.Day. Partial exception: Volume Floor 5m sheet in market_data.xlsx carries real 5-minute bars incl. RTH open for a 26-ticker subset back to 2026-08-24, not yet wired into anything"
   rule:
     definition: "previous session settlement vs today's 9:30 ET open"
+    gap_high_low_assignment_sources_7_8: "premium gap (today's open above prior close): 9:30 ET open = gap high, prior close = gap low. Discount gap (today's open below prior close): assignment reverses - prior close = gap high, 9:30 ET open = gap low. Get this right before grading into quadrants; swapping high/low inverts every CE/OTE level computed from it."
     grading: "quarter, half (CE), three-quarter (OTE), full closure - same quadrant logic as any dealing range"
     target: "50% of RTH opening gap (its CE) is the conservative first target, not full gap fill"
     stated_hit_rate_pct: 70
     stated_hit_window: "by 10:00 NY"
     override: "if higher-timeframe daily read favors a direction, that bias can override the 10:00 time cutoff and the half-gap may not be revisited at all"
     abandon_signal: "a close outside the gap that keeps running is the signal to abandon the gap-closure idea for the session"
+    persistence_note: "an RTH gap can stay an active reference for days, not just the same session (source 6)"
 
 trade_management:
   status: documented_not_automatable
@@ -139,9 +269,14 @@ trade_management:
     rule: "ratchet stop on every new swing low/high in trade's favor, never leave stop at stale level, never jam straight to breakeven to relieve discomfort"
     increment_note: "transcript uses roughly 3 handles at a time on that instrument; not a literal dollar rule to copy across instruments"
     conservatism: "trail tighter when PD arrays are stacked close together; can be more liberal in calmer conditions"
+    unresolved_variant_source_5: "source 5 extends this further - treat the trailing stop as the only exit, letting a winner run past OTE/CE with no predetermined take-profit. Not merged into the rule above; see source.open_conflict"
   position_sizing_gate:
     rule: "before sizing a trade, ask if a full loss on it would make the next trade harder to take; if yes, it is oversized"
     purpose: "determines whether stop-outs stay routine cost-of-business or start causing rule deviation"
+  equity_scaled_micro_sizing:
+    source: 6
+    rule: "start with one micro contract; add one micro per $2,500 of new equity gained; remove one micro per $2,500 lost; risk 0.25-0.5% of account per trade (not 1%) for roughly the first two years"
+    scope: "discretionary futures/micro-contract sizing model - parallel to, not a replacement for, the pipeline's existing 1%-risk/25%-notional formula used elsewhere in this doc and orderflow_strategy_rules.yaml"
 
 rotation_application:
   status: candidate_overlay_not_signal_generator
@@ -154,17 +289,25 @@ daily_stop_target_workflow:
   trigger: "each market_data.xlsx refresh"
   steps:
     - "pull ~20 trading days of daily OHLC for each open position ticker"
-    - "define the dealing range (recent swing high/low relevant to position direction)"
-    - "classify recent highs/lows as smooth or jagged"
-    - "apply decision_hierarchy to find the level to grade"
-    - "locate first FVG with displacement in the return leg"
+    - "define the dealing range (recent swing high/low relevant to position direction), using swing_high_low_definition for the exact boundary bar; note whether the latest bar is an inside_day (compression signal, expect expansion)"
+    - "classify recent highs/lows as smooth or jagged; use smoothest_candidate_tiebreaker if ambiguous"
+    - "apply decision_hierarchy to find the level to grade; check liquidity_run_condition on the path to it"
+    - "locate first FVG with displacement in the return leg; prefer a break_in_structure_gap if both are present; check for a rejection_block as an alternative re-entry reference"
     - "stop = candle 1 low/high of that FVG per position direction"
-    - "target = CE (50%) as conservative first target; OTE (75%) as primary completion reference; far extreme as stretch target only"
+    - "target = CE (50%) as conservative first target; OTE (75%) as primary completion reference; far extreme as stretch target only (see source.open_conflict)"
     - "if inside a suspension block, use block's own quadrant grading instead of single stop/target"
+    - "apply body_vs_wick_respect_test on subsequent bars to confirm the graded zone is still holding; note if sharp_reversal_entry was the applicable mechanism instead of a standard pullback"
   blocking_gap: "execution.status: not_built in orderflow_strategy_rules.yaml; no position tracking exists, open position list (ticker, direction, entry price) must be supplied manually each refresh until a Positions sheet exists"
   scope_note: "produces stop/target for positions already selected by momentum ranking; does not feed back into or replace the ranking"
 
 status_summary:
+  # Built in this pipeline since the above was last regenerated - see DATA_DEFINITION.md section 23 for the
+  # exact fields (location_zones.parquet's zone_status, location_levels.parquet's inside_day) and the measured
+  # backtest result. If this file gets regenerated again from the source transcripts, re-add this block rather
+  # than letting it silently revert to not_built.
+  built_this_pipeline:
+    - body_vs_wick_respect_test   # zone_status: UNTESTED/RESPECTED/FAILED/FILLED, per zone and per chosen entry
+    - inside_day                  # CLASSIC/BODY_ONLY/None, informational, on location_levels.parquet
   daily_bar_computable_not_built:
     - volume_imbalance
     - fair_value_gap
@@ -177,18 +320,39 @@ status_summary:
     - quadrant_grading
     - relative_equal_highs_lows
     - anchor_point_wick_grading
+    - smoothest_candidate_tiebreaker
     - smooth_vs_jagged
     - turtle_soup
     - model_2022
     - order_block
     - gaps_as_magnets
+    - break_in_structure_gap
+    - inflection_point
+    - internal_external_range_liquidity
+    - change_in_state_of_delivery
+    - immediate_rebalance
+    - swing_failure_pattern
+    - swing_high_low_definition  # built, but with a 3-bar-each-side window, not this doc's 1-bar formal rule - see DATA_DEFINITION.md
+    - liquidity_run_condition
+    - rejection_block
+    - sharp_reversal_entry
+  daily_bar_computable_needs_second_ticker_not_built:
+    - smt_divergence
+  external_data_not_pipeline_blocked_not_built:
+    - red_folder_news_timing
   intraday_blocked_not_built:
     - opening_range_half_gap
+    - opening_range_gap_high_low_assignment
     - session_vs_kill_zone_timing
     - swing_structure_1h_4h
+    - judas_swing_precision_timing
   discretionary_not_automatable:
     - trade_management
     - position_sizing_gate
     - one_model_at_a_time
+    - equity_scaled_micro_sizing
+  explanatory_not_a_build_item:
+    - counterparty_theory
+    - key_level_timing_principle
   manual_blocked_on_position_tracking:
     - daily_stop_target_workflow
