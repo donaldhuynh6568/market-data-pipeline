@@ -6,14 +6,10 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from market_data_pipeline.config import DATA_DIR
+from market_data_pipeline.raw import raw_run
 from market_data_pipeline.tickers import load_futures_tickers
 
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={range_}"
-
-# Matches min_volume_per_5min_candle_contracts in
-# reference/orderflow_strategy_rules.yaml exactly.
-VOLUME_FLOOR_CONTRACTS = 20000
 
 DEFAULT_DAYS = 5
 
@@ -54,12 +50,6 @@ def parse_chart_response(payload: dict, symbol: str) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def add_volume_floor_flag(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["volume_floor_met"] = df["volume"] >= VOLUME_FLOOR_CONTRACTS
-    return df
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Collect 5-minute futures volume from Yahoo Finance (free, unofficial, ~10min delayed)."
@@ -75,11 +65,16 @@ def main() -> None:
         print("No futures tickers configured in tickers.yaml, nothing to do.")
         return
 
+    with raw_run("yahoo", "futures_5m", {"days": args.days, "tickers": tickers}, date_col="timestamp") as run:
+        collect_futures(tickers, args.days, run)
+
+
+def collect_futures(tickers: list[str], days: int, run) -> None:
     frames = []
     for symbol in tickers:
         print(f"Fetching {symbol}...")
         try:
-            payload = fetch_yahoo_chart(symbol, range_=f"{args.days}d")
+            payload = fetch_yahoo_chart(symbol, range_=f"{days}d")
         except Exception as exc:  # pragma: no cover - external API
             print(f"  [{symbol}] fetch failed, skipping: {exc}")
             continue
@@ -88,16 +83,13 @@ def main() -> None:
         if df.empty:
             print(f"  [{symbol}] no bars returned")
             continue
-        frames.append(add_volume_floor_flag(df))
+        frames.append(df)
 
     if not frames:
         print("No futures volume data collected.")
         return
 
-    combined = pd.concat(frames, ignore_index=True)
-    out_path = DATA_DIR / "futures_volume_5m.parquet"
-    combined.to_parquet(out_path, index=False)
-    print(f"Saved {len(combined)} rows to {out_path}")
+    run.write(pd.concat(frames, ignore_index=True))
 
 
 if __name__ == "__main__":

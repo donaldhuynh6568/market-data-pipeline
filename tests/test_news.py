@@ -8,7 +8,6 @@ from market_data_pipeline.collectors.news import (
     clean_text,
     fetch_news,
     headline_mentions,
-    merge_news,
 )
 
 NOW = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
@@ -77,39 +76,6 @@ def test_fetch_news_builds_one_row_per_article_and_ticker_and_skips_failures():
     assert request.start == NOW - pd.Timedelta(days=7)
 
 
-def _rows(*items):
-    return pd.DataFrame(
-        [
-            {"id": i, "ticker": t, "headline": h, "created_at": pd.Timestamp(c), "updated_at": pd.Timestamp(u)}
-            for i, t, h, c, u in items
-        ]
-    )
-
-
-def test_merge_dedupes_on_id_and_ticker_keeping_the_latest_update():
-    existing = _rows(("1", "AVGO", "old headline", "2026-09-19", "2026-09-19"))
-    new = _rows(("1", "AVGO", "edited headline", "2026-09-19", "2026-09-20"), ("1", "AMD", "same article, other pick", "2026-09-19", "2026-09-19"))
-
-    merged = merge_news(existing, new, keep_days=90, now=NOW)
-
-    assert len(merged) == 2
-    assert merged.loc[merged["ticker"] == "AVGO", "headline"].iloc[0] == "edited headline"
-    assert set(merged["ticker"]) == {"AVGO", "AMD"}
-
-
-def test_merge_keeps_older_picks_and_prunes_by_keep_days():
-    existing = _rows(("1", "XLE", "kept from an earlier run", "2026-09-10", "2026-09-10"), ("2", "XLE", "ancient", "2026-05-01", "2026-05-01"))
-    new = _rows(("3", "AVGO", "fresh", "2026-09-19", "2026-09-19"))
-
-    merged = merge_news(existing, new, keep_days=30, now=NOW)
-
-    assert sorted(merged["id"]) == ["1", "3"]
-
-
-def test_merge_with_nothing_returns_an_empty_frame():
-    assert merge_news(None, pd.DataFrame(), keep_days=90, now=NOW).empty
-
-
 def test_company_name_alias_makes_a_multi_ticker_article_relevant():
     tags5 = ["AMZN", "AVGO", "MSFT", "NVDA", "ORCL"]
 
@@ -126,10 +92,3 @@ def test_fetch_news_applies_aliases_per_ticker():
     without = fetch_news(client, ["AVGO"], 7, 50, now=NOW)
 
     assert with_alias["relevance"].tolist() == ["HIGH"] and without["relevance"].tolist() == ["LOW"]
-
-
-def test_refetch_replaces_a_stored_row_with_the_same_updated_at():
-    old = _rows(("1", "AVGO", "old classification", "2026-09-19", "2026-09-19"))
-    new = _rows(("1", "AVGO", "re-fetched", "2026-09-19", "2026-09-19"))
-
-    assert merge_news(old, new, keep_days=90, now=NOW)["headline"].tolist() == ["re-fetched"]

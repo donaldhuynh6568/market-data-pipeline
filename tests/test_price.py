@@ -1,7 +1,7 @@
 import pytest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from market_data_pipeline.collectors.price import OUTPUT_FILENAMES, TIMEFRAME_CHOICES
+from market_data_pipeline.collectors.price import RAW_DATASETS, TIMEFRAME_CHOICES
 
 
 @pytest.mark.parametrize(
@@ -21,25 +21,10 @@ def test_timeframe_choices_map_to_correct_alpaca_timeframe(choice, expected_amou
     assert timeframe.unit == expected_unit
 
 
-def test_default_daily_output_filename_is_unchanged_for_backward_compatibility():
-    assert OUTPUT_FILENAMES["1Day"] == "price_data.parquet"
-
-
-@pytest.mark.parametrize(
-    ("choice", "expected_filename"),
-    [
-        ("1Hour", "price_data_1h.parquet"),
-        ("4Hour", "price_data_4h.parquet"),
-        ("5Min", "price_data_5m.parquet"),
-    ],
-)
-def test_intraday_output_filenames_are_distinct_from_daily(choice, expected_filename):
-    assert OUTPUT_FILENAMES[choice] == expected_filename
-    assert OUTPUT_FILENAMES[choice] != OUTPUT_FILENAMES["1Day"]
-
-
-def test_every_timeframe_choice_has_an_output_filename():
-    assert set(TIMEFRAME_CHOICES) == set(OUTPUT_FILENAMES)
+def test_every_timeframe_has_its_own_raw_dataset():
+    assert set(TIMEFRAME_CHOICES) == set(RAW_DATASETS)
+    assert RAW_DATASETS["1Day"] == "bars_1d"
+    assert len(set(RAW_DATASETS.values())) == len(RAW_DATASETS)
 
 
 # --- incremental refresh -----------------------------------------------------------------------------------------
@@ -85,14 +70,7 @@ def test_plan_fetch_ignores_stored_symbols_no_longer_requested():
     assert symbols == ["A"] and start == datetime(2026, 10, 4, tzinfo=timezone.utc)
 
 
-def test_shrink_warning_only_when_stored_history_is_older_than_the_window():
-    stored = _stored({"A": "2024-01-01"})
-    assert "drops 1 stored bars" in price.shrink_warning(stored, 90, END)
-    assert price.shrink_warning(stored, 5000, END) is None
-    assert price.shrink_warning(None, 90, END) is None
-
-
-def test_collect_bars_fetches_only_the_tail_and_merge_keeps_old_symbols(monkeypatch):
+def test_collect_bars_fetches_only_the_tail(monkeypatch):
     calls = []
 
     def fake(kind):
@@ -113,10 +91,7 @@ def test_collect_bars_fetches_only_the_tail_and_merge_keeps_old_symbols(monkeypa
     assert calls[0][2] == datetime(2026, 10, 3, tzinfo=timezone.utc)      # tail only, not 730 days
     assert calls[1][2] == END - timedelta(days=730)                       # the new ticker backfills in full
 
-    from market_data_pipeline.storage import merge_frames
-    merged = merge_frames(stored, fetched, ["symbol", "timestamp"])
-    assert set(merged["symbol"]) == {"A", "BTC/USD", "ZZZ"}
-    assert merged.loc[(merged.symbol == "A") & (merged.timestamp == "2026-10-04"), "close"].iloc[0] == 1.0   # kept
+    assert set(fetched["symbol"]) == {"A", "BTC/USD", "ZZZ"}
 
 
 def test_plan_fetch_gives_a_long_stale_symbol_its_own_request():
@@ -128,3 +103,24 @@ def test_plan_fetch_gives_a_long_stale_symbol_its_own_request():
         (["A", "B"], datetime(2026, 10, 3, tzinfo=timezone.utc)),
         (["HALTED"], datetime(2026, 7, 30, tzinfo=timezone.utc)),
     ]
+
+
+def test_main_appends_to_raw_and_resumes_from_raw(monkeypatch, tmp_path):
+    from market_data_pipeline import raw
+
+    monkeypatch.setattr(raw, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(price, "load_tickers", lambda: {"equities": ["A"], "crypto": []})
+    starts = []
+
+    def fetch(symbols, start, end, timeframe):
+        starts.append(start)
+        return pd.DataFrame({"symbol": symbols, "timestamp": pd.Timestamp("2026-10-05", tz="UTC"), "close": 2.0})
+
+    monkeypatch.setattr(price, "fetch_equity_bars", fetch)
+    monkeypatch.setattr("sys.argv", ["price"])
+    price.main()
+    price.main()
+
+    stored = raw.read_raw("alpaca", "bars_1d")
+    assert len(stored) == 2 and stored["run_id"].nunique() == 2          # appended, nothing overwritten
+    assert starts[1] > starts[0]                                         # second run resumed from raw

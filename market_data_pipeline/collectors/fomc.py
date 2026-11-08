@@ -7,10 +7,10 @@ import pandas as pd
 import yaml
 
 from market_data_pipeline.collectors.fred import fetch_series_observations, parse_fred_observations
-from market_data_pipeline.config import ROOT_DIR, require_fred_api_key
-from market_data_pipeline.storage import save_parquet, upsert_to_supabase
+from market_data_pipeline.config import CONFIG_DIR, require_fred_api_key
+from market_data_pipeline.raw import raw_run
 
-FOMC_DATES_PATH = ROOT_DIR / "fomc_meeting_dates.yaml"
+FOMC_DATES_PATH = CONFIG_DIR / "fomc_meeting_dates.yaml"
 
 # Target rate range set directly by FOMC decisions (since Dec 2008). Unlike DFF
 # (market-driven daily effective rate), these only change on days the FOMC
@@ -82,22 +82,16 @@ def main() -> None:
 
     api_key = require_fred_api_key()
 
-    print("Fetching DFEDTARU...")
-    payload = fetch_series_observations("DFEDTARU", api_key)
-    target_rate_upper = parse_fred_observations(payload, "DFEDTARU")
+    with raw_run("fred", "fomc_decisions", {"dates_file": args.dates_file}, date_col="date") as run:
+        print("Fetching DFEDTARU...")
+        payload = fetch_series_observations("DFEDTARU", api_key)
+        target_rate_upper = parse_fred_observations(payload, "DFEDTARU")
 
-    decisions = build_fomc_decisions(meeting_dates, target_rate_upper)
-    if decisions.empty:
-        print("No FOMC decisions built.")
-        return
-
-    out_path = save_parquet(decisions, "fomc_decisions.parquet")
-    print(f"Saved {len(decisions)} rows to {out_path}")
-
-    records = (
-        decisions.astype(object).where(pd.notnull(decisions), None).to_dict(orient="records")
-    )
-    upsert_to_supabase("fomc_decisions", records, on_conflict="date")
+        decisions = build_fomc_decisions(meeting_dates, target_rate_upper)
+        if decisions.empty:
+            print("No FOMC decisions built.")
+            return
+        run.write(decisions)
 
 
 if __name__ == "__main__":

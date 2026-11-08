@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from market_data_pipeline.config import DATA_DIR
+from market_data_pipeline.raw import raw_run
 
 
 def normalize_column_name(column_name: str) -> str:
@@ -272,14 +272,13 @@ def main() -> None:
     args = parser.parse_args()
 
     sources = args.source_url or [None]
-    frames = [
-        load_cot_data(source=source, csv_path=args.csv_path, targets=args.commodities)
-        for source in sources
-    ]
-    filtered = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-    out_path = DATA_DIR / "cot_data.parquet"
-    filtered.to_parquet(out_path, index=False)
-    print(f"Saved {len(filtered)} COT rows to {out_path}")
+    params = {"source_url": args.source_url, "csv_path": args.csv_path, "commodities": args.commodities}
+    with raw_run("cftc", "cot", params) as run:
+        frames = [
+            load_cot_data(source=source, csv_path=args.csv_path, targets=args.commodities)
+            for source in sources
+        ]
+        run.write(pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0])
 
 
 if __name__ == "__main__":

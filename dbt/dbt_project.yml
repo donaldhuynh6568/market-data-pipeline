@@ -1,0 +1,43 @@
+name: market_data
+version: "1.0.0"
+profile: market_data
+config-version: 2
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "logs"]
+
+# Run from the repo root (market_data_pipeline.build does this), so every path below is relative to it.
+# Defaults only: the real values come from config/strategy.yaml via --vars (market_data_pipeline/settings.py).
+vars:
+  execution_lag_days: 1
+  ffill_cap_days: 5
+  target_horizon: 21
+  split: {train: 0.70, validation: 0.15, test: 0.15}
+  report_splits: [train, validation]
+  top_n_grid: [1, 2, 3, 5]
+  trend_filter: {indices: [SPY, QQQ], defensive_asset: GLD}
+  fred_lag_days: {daily: 1, weekly: 7, monthly: 45, quarterly: 120}
+
+models:
+  market_data:
+    staging:
+      +materialized: view
+    audit:
+      +materialized: table
+    marts:
+      # Each mart is written to data/marts/<name>.parquet, the files the simulation, notebook and Excel read.
+      +materialized: external
+
+seeds:
+  market_data:
+    universe:
+      +column_types:
+        ticker: varchar
+        asset_class: varchar
+        category: varchar
+        is_cash_like: boolean
+        is_rankable: boolean

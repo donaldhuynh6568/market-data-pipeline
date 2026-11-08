@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 from market_data_pipeline.config import require_fred_api_key
-from market_data_pipeline.storage import save_parquet, upsert_to_supabase
+from market_data_pipeline.raw import raw_run
 
 FRED_BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
@@ -62,8 +62,13 @@ def main() -> None:
 
     api_key = require_fred_api_key()
 
+    with raw_run("fred", "series", {"series": args.series}, date_col="date") as run:
+        collect_series(args.series, api_key, run)
+
+
+def collect_series(series_ids: list[str], api_key: str, run) -> None:
     frames = []
-    for series_id in args.series:
+    for series_id in series_ids:
         print(f"Fetching {series_id}...")
         try:
             payload = fetch_series_observations(series_id, api_key)
@@ -81,14 +86,7 @@ def main() -> None:
         print("No FRED data collected.")
         return
 
-    combined = pd.concat(frames, ignore_index=True)
-    out_path = save_parquet(combined, "fred_data.parquet")
-    print(f"Saved {len(combined)} rows to {out_path}")
-
-    records = (
-        combined.astype(object).where(pd.notnull(combined), None).to_dict(orient="records")
-    )
-    upsert_to_supabase("fred_data", records, on_conflict="series_id,date")
+    run.write(pd.concat(frames, ignore_index=True))
 
 
 if __name__ == "__main__":

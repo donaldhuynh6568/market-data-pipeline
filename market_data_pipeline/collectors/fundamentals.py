@@ -11,7 +11,7 @@ from market_data_pipeline.collectors.sec import (
     fetch_json,
 )
 from market_data_pipeline.config import require_sec_user_agent
-from market_data_pipeline.storage import save_parquet, upsert_to_supabase
+from market_data_pipeline.raw import raw_run
 from market_data_pipeline.tickers import load_equity_category
 
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
@@ -166,6 +166,11 @@ def main() -> None:
         print("No large_cap tickers configured in tickers.yaml, nothing to do.")
         return
 
+    with raw_run("sec", "companyfacts", {"tickers": tickers}, date_col="fiscal_period_end") as run:
+        collect_fundamentals(tickers, user_agent, run)
+
+
+def collect_fundamentals(tickers: list[str], user_agent: str, run) -> None:
     cik_by_ticker = build_ticker_cik_map(fetch_json(TICKER_MAP_URL, user_agent))
 
     frames = []
@@ -193,16 +198,7 @@ def main() -> None:
         print("No fundamentals data collected.")
         return
 
-    combined = pd.concat(frames, ignore_index=True)
-    out_path = save_parquet(combined, "fundamentals_data.parquet")
-    print(f"Saved {len(combined)} fundamentals rows to {out_path}")
-
-    upsert_to_supabase(
-        "fundamentals_data",
-        combined.to_dict(orient="records"),
-        on_conflict="ticker,fiscal_period_end,form",
-    )
-
+    run.write(pd.concat(frames, ignore_index=True))
 
 if __name__ == "__main__":
     main()

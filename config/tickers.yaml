@@ -45,6 +45,9 @@ equities:
     - CEG
     - VST
     - GEV
+    - TSM
+    - NFLX
+    
   defensive:
     - TLT
     - SHV

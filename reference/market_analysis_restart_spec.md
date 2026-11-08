@@ -1,6 +1,6 @@
-# Market Analysis Restart: Spec (v1, draft)
+# Market Analysis Restart: Spec (v2)
 
-Status: v1 draft. The factual OPEN items are resolved from a code audit (2026-10-22). Items still marked **OPEN** are decisions to make.
+Status: v2. Phases 1-4 are built (hard reset on 2026-10-22, branch `restart`; the prior state is tagged `pre-reset`). Items still marked **OPEN** are decisions to make. The companion spec is `analysis_strategy_spec.md`.
 
 ## 1. Goal
 
@@ -9,161 +9,135 @@ Restart the analysis on top of the existing collectors using a raw / staging / m
 ## 2. Principles
 
 - Raw is append-only and untouched. Collectors write it, nothing else does.
-- Parquet is storage, DuckDB is the query engine. No database server.
+- Parquet is storage, DuckDB is the query engine, **dbt** owns the SQL transformations. No database server.
 - Every table declares its grain and has a uniqueness test.
-- Point-in-time correctness: slow data (FRED, COT, fundamentals) carries an `available_at` date so nothing leaks future information.
+- Point-in-time correctness: slow data carries an `available_at` date so nothing leaks future information.
 - Forward returns are targets only and are never used as features.
-- A signal earns a place only if it beats baselines out of sample (see section 8).
+- A signal earns a place only if it beats baselines out of sample (section 8).
 
-## 3. Layers and folder layout
+## 3. Layers and folder layout (as built)
 
 ```
 data/
-  raw/<source>/<dataset>/ingest_date=YYYY-MM-DD/part-*.parquet
-  staging/<dataset>.parquet
-  marts/<mart_name>.parquet
-config/tickers.yaml
-sql/staging/*.sql
-sql/marts/*.sql
+  raw/<source>/<dataset>/ingest_date=YYYY-MM-DD/part-<run_id>.parquet
+  raw/_manifest/ingest_date=YYYY-MM-DD/part-<run_id>.parquet
+  warehouse.duckdb            dbt target (staging views, audit tables)
+  marts/<mart_name>.parquet   dbt external marts + simulation marts
+  review/                     Excel review workbooks
+config/   tickers.yaml, strategy.yaml, feature_registry.yaml, fomc_meeting_dates.yaml
+dbt/      models/staging, models/marts, models/audit, macros, tests, seeds/universe.csv
+market_data_pipeline/  collectors/, raw.py, settings.py, build.py, sim/, review/
+notebooks/mart_review.ipynb
 ```
+
+**Deviations from v1:**
+- `dbt/` replaces the planned `sql/` folder.
+- The simulation and performance marts are Python (`market_data_pipeline/sim/`) rather than SQL, because they need seeded random draws and vectorized portfolio math.
 
 | Layer | Contents | Logic allowed |
 |---|---|---|
 | raw | Collector output as received, plus metadata columns | None |
 | staging | One table per source: typed, renamed, deduped, keyed | Cleaning only |
-| marts | Analysis tables built only from staging | Features, ranks, backtests |
+| marts | Analysis tables built only from staging | Features, ranks, signals, backtests |
 
-## 4. Collectors in scope
+## 4. Collectors
 
-Decision: **every collector moves to the raw layer.** Whether a source feeds staging or marts is decided separately, source by source.
+Decision: **all collectors kept, all write to raw** through `raw.raw_run`.
 
-How collectors write today:
-- **merge**: load the flat file, concat, dedupe on key (newest wins), rewrite the file.
-- **overwrite**: full re-fetch through `save_parquet`.
-- **plain overwrite**: `df.to_parquet` directly, bypassing `storage.py`.
+| Collector | Raw dataset | Feeds staging? |
+|---|---|---|
+| price.py | `alpaca/bars_1d` (+ `bars_1h`, `bars_4h`, `bars_5m`) | Daily: yes. Intraday: parked |
+| fred.py | `fred/series` | Yes (VIXCLS used by features) |
+| options.py | `alpaca/options_chain` | Not yet |
+| deribit_options.py | `deribit/options_chain` | Not yet |
+| perps.py | `perps/funding_oi` | Not yet |
+| news.py | `alpaca/news` | Not yet |
+| fomc.py | `fred/fomc_decisions` | Not yet |
+| sec.py, fundamentals.py, insider.py, institutional.py | `sec/filings`, `sec/companyfacts`, `sec/form4`, `sec/13f` | Not yet |
+| cot.py | `cftc/cot` | Not yet |
+| futures_volume.py | `yahoo/futures_5m` | Not yet |
+| congress.py | `senate_watcher/trades` | **OPEN**: drop it? The data ends 2020-12-02 |
 
-| Collector | Dataset | Grain | Write today | Raw layer? |
-|---|---|---|---|---|
-| price.py | Alpaca bars, stocks and crypto (1Day, 1Hour, 4Hour, 5Min) | symbol, timestamp (one file per timeframe) | merge; `--full` overwrites | Yes |
-| options.py | Alpaca option chain plus flow metrics | contract_symbol, snapshot_date | merge, **prunes snapshots older than 90 days** | Yes |
-| deribit_options.py | Deribit BTC/ETH (SOL optional) chains; also writes `gex_crypto.parquet` | contract_symbol, snapshot_date | merge, **prunes snapshots older than 90 days** | Yes |
-| perps.py | Binance, Hyperliquid (Bybit optional) perpetuals | symbol, venue, timestamp | merge, then pruned | Yes |
-| news.py | Headlines per ticker | article | merge, keeps 90 days | Yes |
-| fred.py | About 27 macro series | series_id, date | overwrite | Yes |
-| fomc.py | FOMC decisions | meeting date | overwrite | Yes |
-| fundamentals.py | SEC XBRL companyfacts | ticker, metric, period | overwrite | Yes |
-| sec.py | EDGAR filing list | accession | overwrite | Yes |
-| cot.py | CFTC Commitments of Traders | market, report_date (weekly) | plain overwrite | Yes |
-| insider.py | Form 4 filings, last 10 per ticker | transaction | plain overwrite | Yes |
-| institutional.py | 13F holdings, fund watchlist | fund, filing, holding | plain overwrite | Yes |
-| futures_volume.py | Yahoo 5-minute bars, MNQ/MES/SIL | symbol, timestamp | plain overwrite | Yes |
-| congress.py | Senate Stock Watcher | transaction | plain overwrite | Yes. **OPEN**: drop it? The data ends 2020-12-02 (`congress.py:18-19`). |
+**Changes made at the reset:**
+- Derived columns came out of the collectors, so raw stays as received:
+  - options flow metrics
+  - Deribit GEX and the `gex_crypto` file
+  - the futures volume-floor flag
+- The news `source` column was renamed `publisher`, because `source` is reserved for raw metadata.
+- Supabase upload was removed.
 
-Intraday bars (5-minute, 1H, 4H) land in raw but stay **parked** for analysis.
+## 5. Raw layer contract (built)
 
-## 5. Raw layer contract
+Every raw table keeps its original columns and values, plus `source`, `ingested_at` (UTC), `run_id` and `request_params` (JSON).
+- Writing a column with one of those names is refused.
+- The manifest logs one row per run: run_id, dataset, status (`success` / `empty` / `failed`), row and file count, min and max date, timing and error.
+- Nothing is ever pruned or rewritten. Options snapshots now accumulate indefinitely.
+- The roughly 90 days of option and Deribit snapshots from before the reset are in `data/_legacy/`, unread.
 
-Every raw table keeps original columns and values, plus:
-
-- `source`
-- `ingested_at` (UTC)
-- `run_id`
-- `request_params`
-
-Also: a manifest table logging run_id, dataset, row count, min/max date, status.
-
-**Current state (resolved):** Nothing appends to partitions today, and there are no metadata columns and no manifest.
-- **Data is being lost now.** Options snapshots can't be re-fetched, yet `options.py:223-226` and `deribit_options.py:134-137` delete them after 90 days (via `prune_old_snapshots`, `--keep-days` default 90).
-- **The write path to refactor is `storage.py`:** `save_parquet`, `merge_parquet`, `prune_old_snapshots`.
-- **Collectors that bypass it** must be routed through it: `cot.py:281`, `congress.py:58`, `insider.py:158`, `institutional.py:142`, `futures_volume.py:99`, and `deribit_options.py:142-143` (the gex_crypto file).
-- **OPEN:** keep or drop the best-effort Supabase upsert (`storage.py:91-101`).
+Exit check passed: two price runs produced two files; the incremental run resumed from `raw_max`; the manifest logged both.
 
 ## 6. Universe
 
-Current state (resolved):
-- `tickers.yaml` has **no 25-asset list**. "25 assets" appears only in prose in `reference/rotationstrategy.md`.
-- It holds 42 unique equities across groups:
-  - `broad_market`: SPY, QQQ, IWM, XLU, SMH
-  - `large_cap`: 27 names
-  - `defensive`: TLT, SHV
-  - `sectors`: XLE, XLU, XLP, XLC, XLV
-  - `alternative`: GLD, SLV, IBIT, IETH
-- It also holds crypto (BTC/USD, ETH/USD, SOL/USD) and futures (MNQ=F, MES=F, SIL=F).
-- PLTR, CAVA and HOOD are **not** in `tickers.yaml`.
-- SHV is `cash_like` and is excluded from the momentum rank.
-- There is no VIX ticker. FRED `VIXCLS` is the only VIX proxy.
-- Crypto is counted per bar (calendar days) and annualized with 365 (`momentum.py:18`). Nothing aligns crypto to trading days.
+- **Basket:** the whole of `config/tickers.yaml` (42 equities + 3 crypto pairs) minus `cash_like` (SHV). There is no separate 25-name list.
+- **Context tickers:** SPY and QQQ for the trend filter; GLD as the defensive asset; VIX from FRED VIXCLS (point in time).
+- **Crypto:** sampled on the equity (SPY) trading calendar, so all tickers share one date axis. A Monday return includes the weekend.
+- **Minimum history:** a ticker becomes eligible once it has a full 3-month momentum score (64 trading days). SPCX, SNDK, GEV and IBIT therefore join late. IETH stopped trading on 2026-07-31 and drops out after its last bar plus the 5-day fill cap.
 
-Decisions:
-- Momentum basket: the 25-asset rotation list. **OPEN**: define it, likely as a new `rotation` group in `tickers.yaml`.
-- Context tickers: **OPEN**. SPY, QQQ, GLD and TLT are already collected. For VIX, use FRED VIXCLS or add a ticker?
-- Crypto handling (BTC and ETH trade on weekends): **OPEN**. Align to the equity calendar, or keep crypto on its own calendar?
-- Short-history names: **OPEN**. Decide a minimum-history rule, and whether PLTR, CAVA and HOOD join at all.
+## 7. Staging (built, dbt)
 
-## 7. Staging contract
+- `stg_price_daily`: newest ingest wins. Equity dates are in New York time, crypto dates in UTC.
+- `stg_fred`: `available_at` = observation date + a lag for the inferred frequency. The lags are daily 1, weekly 7, monthly 45 and quarterly 120 days (`config/strategy.yaml`).
+  - Caveat: values are the latest vintage, not true revision history.
+- `stg_trading_calendar`: SPY trading dates.
+- Tests:
+  - unique key and not-null on every grain
+  - close > 0 and high ≥ low
+  - a no-gap check against the SPY calendar (warn level)
 
-- Types fixed, columns renamed to one consistent style.
-- Duplicates removed by keeping the latest `ingested_at`.
-- Tests: unique key, no null keys, price > 0, no unexplained date gaps.
-- `available_at` added for slow data. Lag rules per source: **OPEN**.
+## 8. Marts (built)
 
-Current state: DuckDB is not yet a dependency (`pyproject.toml`), and there is no `sql/` folder or staging code. Adding DuckDB is part of Phase 3.
+The marts follow the design in analysis spec section 9; the full list is in `DATA_DEFINITION.md`.
 
-## 8. Marts
+**Momentum v1 (as built):**
+- 1, 3, 6 and 12-month returns, plus a 12-month return that skips the latest month.
+- 1 and 3-month realized volatility, computed on returns.
+- Score = 3-month return ÷ 3-month volatility, with a cross-sectional rank.
+- Distance from the 200-day MA, plus the SPY and QQQ MA flags.
 
-| Mart | Grain | Purpose | Status |
-|---|---|---|---|
-| mart_price_daily | ticker, date | Clean daily spine, returns | Defined |
-| mart_momentum | ticker, rebalance_date | Momentum features and rank | Defined, details **OPEN** |
-| mart_regime | date | Trend filter, VIX, later GEX | **OPEN** |
-| mart_backtest | rebalance_date | Holdings and net returns | **OPEN** |
+**Evaluation settings:**
+- Baselines: equal-weight, SPY buy-and-hold, and 200 random draws per top-N.
+- Costs: 0.10% per side for equities, 0.25% per side for crypto.
+- Rebalance monthly: the signal at the month-end close, filled at the next day's close.
+- Top-N grid: {1, 2, 3, 5}.
+- Split: 70/15/15 with 21-day gaps.
 
-Momentum v1 starting point (to be confirmed):
-- Returns at 1, 3, 6, 12 months, plus skip-recent-month variant.
-- Volatility-adjusted score.
-- Cross-sectional rank per rebalance date.
-- 200-day MA flag.
-
-Current code, for reference. These marts are **new builds, not ports**.
-- **`transforms/momentum.py`**:
-  - Its main score is the 10-bar return ÷ 10-bar annualized vol (vol floored at 5%).
-  - It also computes 5/20/60-bar returns, a 60-bar vol-adjusted score and acceleration labels.
-  - It writes **one latest snapshot per symbol**, with no history by rebalance date.
-  - `above_200d_ma` is computed (`momentum.py:106-109`) but not used as a filter.
-  - None of the 1/3/6/12-month lookbacks exist.
-- **`transforms/backtest.py`** is an ICT-zone R-multiple test with a random-entry control and score-tercile forward returns. It is not a top-N rotation backtest, and it assumes no transaction costs.
-
-Keep-or-cut baselines: equal-weight basket, SPY buy and hold, random selection. Still **OPEN**:
-- Cost assumption.
-- Rebalance frequency (monthly vs weekly check).
-- Position count (top N).
-- Train / validation / test date split.
+All of these are in `config/strategy.yaml` and remain provisional.
 
 ## 9. Phases
 
-1. **Raw refactor.** Exit: two runs produce two partitions, no data loss.
-   1. Stop the 90-day pruning in options and deribit_options. Do this first, because that data is unrecoverable.
-   2. Make `storage.py` write partitioned appends under `data/raw/<source>/<dataset>/ingest_date=.../`.
-   3. Add the metadata columns (`source`, `ingested_at`, `run_id`, `request_params`).
-   4. Add the manifest table.
-   5. Route the collectors that bypass `storage.py` through it (section 5).
-2. **Backfill daily bars** for the full universe. Exit: per-ticker date coverage logged in the manifest.
-   - The default first fetch is 730 days (`price.py:32`).
-   - **OPEN**: how far back Alpaca actually goes for stocks and crypto. Find out with a test fetch.
-3. **Staging** for price, then the other sources. Add DuckDB here.
-4. **Momentum mart and baseline backtest.**
-5. **Candidate signals**, one at a time, each judged against baselines.
+1. ✅ **Raw refactor.** Partitioned appends, metadata, manifest, pruning stopped.
+2. ✅ **Backfill.** Alpaca daily history starts on **2016-01-04 for equities** and **2021-01-01 for crypto** (found with `price --probe`). The full backfill landed 105k bars.
+3. ✅ **Staging** in dbt.
+4. ✅ **Momentum mart and baseline backtest.** The simulation and review (notebook + Excel) are built too.
+5. **Candidate signals**, one at a time, each judged against baselines. Not started.
 
-**Legacy outputs:** from Phase 1 on, existing outputs may break. That covers `combine.py` (`market_data.xlsx`), `reports/confluence_report.py`, and the current transforms and reports that read flat files in `data/`. Each will either be rebuilt from marts or retired.
+**First results (2026-10-22, test split unseen):**
+- **Train** (2016-10 to 2023-09, 83 rebalances): top-3 and top-5 net CAGR of 40% and 37%, against 23% for equal-weight and 13% for SPY. Both beat 99% of same-size random draws.
+- **Validation** (2023-10 to 2025-03, 17 rebalances):
+  - Only top-1 beats all baselines (random percentile 0.98), and it rests on just 17 rebalances.
+  - Top-2, top-3 and top-5 lose to same-size random selection.
+  - Mean rank IC is −0.05.
+- **Verdict:** nothing is a KEEP candidate yet. The robustness grid fails: top-1 is a lone good cell.
+- **Caveat:** survivorship bias in the hand-picked universe inflates every absolute number.
 
-## 10. Open questions summary
+## 10. Open questions
 
-1. ~~Overwrite or append today?~~ **Answered:** merge or overwrite of flat files, nothing appended. Options history is pruned at 90 days (section 5).
-2. ~~Which non-price collectors stay?~~ **Answered:** all of them move to raw. Staging and mart use is decided per source.
-3. Context tickers and crypto handling? (section 6)
-4. Alpaca history depth for stocks and crypto? **Partly answered:** 730 days is the current default; the true maximum is untested.
-5. Costs, rebalance frequency, top N, and date splits?
-6. Does the Excel workbook come back as a review output built from marts? (Breaking it during the restart is accepted.)
-7. Which 25 names make up the rotation basket? Add them to `tickers.yaml` as a group.
-8. Keep or drop the Supabase upsert?
-9. Drop the congress collector (data ends 2020)?
+1. ~~Overwrite or append?~~ Append-only raw is built.
+2. ~~Which collectors stay?~~ All of them; staging is added per need.
+3. ~~Context tickers and crypto handling?~~ SPY, QQQ, GLD and VIXCLS; crypto on the equity calendar.
+4. ~~Alpaca history depth?~~ 2016 for equities, 2021 for crypto. **OPEN:** source a longer history (and a survivorship-free universe)?
+5. ~~Costs, rebalance, top N, splits?~~ Provisional values in `config/strategy.yaml`. **OPEN:** confirm them.
+6. ~~Excel workbook?~~ It is now a review output built from the marts (`python -m market_data_pipeline.review`).
+7. ~~25-name basket?~~ The whole universe is used. **OPEN:** remove near-duplicate exposures (IBIT/IETH vs BTC/ETH)?
+8. ~~Supabase?~~ Dropped.
+9. Drop the congress collector (data ends 2020)? **OPEN.**

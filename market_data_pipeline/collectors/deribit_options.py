@@ -8,9 +8,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from market_data_pipeline.config import DATA_DIR
-from market_data_pipeline.storage import merge_parquet, prune_old_snapshots, save_parquet
-from market_data_pipeline.transforms.gex import compute_gex
+from market_data_pipeline.raw import raw_run
 
 BASE_URL = "https://www.deribit.com/api/v2/public"
 SUPPORTED_CURRENCIES = ["BTC", "ETH", "SOL"]
@@ -104,15 +102,18 @@ def fetch_chain(currency: str, moneyness: float, max_expiry_days: int) -> pd.Dat
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect Deribit crypto options and compute crypto GEX.")
+    parser = argparse.ArgumentParser(description="Collect Deribit crypto option chains into the raw layer.")
     parser.add_argument("--currencies", nargs="*", choices=SUPPORTED_CURRENCIES, default=DEFAULT_CURRENCIES)
     parser.add_argument("--moneyness", type=float, default=0.20, help="Strike filter as +/- fraction of spot")
     parser.add_argument("--max-expiry-days", type=int, default=60)
-    parser.add_argument(
-        "--keep-days", type=int, default=90, help="Drop stored snapshots older than this many days."
-    )
     args = parser.parse_args()
 
+    params = {"currencies": args.currencies, "moneyness": args.moneyness, "max_expiry_days": args.max_expiry_days}
+    with raw_run("deribit", "options_chain", params, date_col="snapshot_date") as run:
+        collect_chains(args, run)
+
+
+def collect_chains(args, run) -> None:
     chains = []
     for currency in args.currencies:
         try:
@@ -130,21 +131,7 @@ def main() -> None:
         print("No Deribit options data collected.")
         return
 
-    combined = pd.concat(chains, ignore_index=True)
-    # Append to the stored history (same-day reruns replace that day), then derive GEX per snapshot_date from it.
-    history = prune_old_snapshots(
-        merge_parquet(combined, "deribit_options.parquet", ["contract_symbol", "snapshot_date"]), args.keep_days
-    )
-    options_path = save_parquet(history, "deribit_options.parquet")
-    print(f"Saved {len(combined)} contract rows to {options_path} ({len(history)} across all stored snapshots)")
-
-    gex = compute_gex(history)
-    gex_path = DATA_DIR / "gex_crypto.parquet"
-    gex.to_parquet(gex_path, index=False)
-    print(f"Saved {len(gex)} crypto GEX rows to {gex_path}")
-    for _, row in gex.iterrows():
-        print(f"  [{row['symbol']}] total_gamma={row['total_gamma']:.2e} regime={row['gamma_regime']}")
-
+    run.write(pd.concat(chains, ignore_index=True))
 
 if __name__ == "__main__":
     main()

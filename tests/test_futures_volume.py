@@ -1,8 +1,4 @@
-from market_data_pipeline.collectors.futures_volume import (
-    VOLUME_FLOOR_CONTRACTS,
-    add_volume_floor_flag,
-    parse_chart_response,
-)
+from market_data_pipeline.collectors.futures_volume import parse_chart_response
 
 # Trimmed real fixture: MNQ=F 5-minute bars, captured live from Yahoo Finance's
 # chart endpoint during development. The last bar (volume=0) is the currently
@@ -57,23 +53,3 @@ def test_parse_chart_response_returns_empty_for_no_result():
 
     assert parse_chart_response(payload, "BOGUS=F").empty
 
-
-def test_add_volume_floor_flag_matches_the_configured_threshold():
-    df = parse_chart_response(MNQ_CHART_RESPONSE, "MNQ=F")
-
-    result = add_volume_floor_flag(df)
-
-    assert VOLUME_FLOOR_CONTRACTS == 20000
-    # 5240, 6004, 3773, 2455, 432 — all below the 20,000-contract floor
-    assert not result["volume_floor_met"].any()
-
-
-def test_add_volume_floor_flag_true_when_at_or_above_threshold():
-    df = parse_chart_response(MNQ_CHART_RESPONSE, "MNQ=F")
-    df.loc[0, "volume"] = 20000
-    df.loc[1, "volume"] = 25000
-
-    result = add_volume_floor_flag(df)
-
-    assert result["volume_floor_met"].tolist()[:2] == [True, True]
-    assert not result["volume_floor_met"].tolist()[2]

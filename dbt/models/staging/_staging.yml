@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: stg_price_daily
+    description: Daily bars, one per ticker and trading date (newest ingest wins). Prices are split/dividend adjusted.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [ticker, date]}
+      - expression_is_true:
+          arguments: {expression: "close > 0 and high >= low"}
+    columns:
+      - name: ticker
+        data_tests: [not_null]
+      - name: date
+        data_tests: [not_null]
+      - name: close
+        data_tests: [not_null]
+
+  - name: stg_fred
+    description: FRED observations with point-in-time `available_at`.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [series_id, observation_date]}
+      - expression_is_true:
+          arguments: {expression: "available_at > observation_date"}
+    columns:
+      - name: series_id
+        data_tests: [not_null]
+      - name: frequency
+        data_tests:
+          - accepted_values:
+              arguments: {values: [daily, weekly, monthly, quarterly]}
+
+  - name: stg_trading_calendar
+    description: SPY trading dates with month-position helpers. The shared date axis for every mart.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [date]}

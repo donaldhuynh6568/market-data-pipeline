@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 from market_data_pipeline.config import require_sec_user_agent
-from market_data_pipeline.storage import save_parquet
+from market_data_pipeline.raw import raw_run
 from market_data_pipeline.tickers import load_tickers
 
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -87,6 +87,11 @@ def main() -> None:
     user_agent = require_sec_user_agent()
     tickers = load_tickers()["equities"]
 
+    with raw_run("sec", "filings", {"forms": args.forms, "tickers": tickers}, date_col="release_date") as run:
+        collect_filings(tickers, args.forms, user_agent, run)
+
+
+def collect_filings(tickers: list[str], forms: list[str], user_agent: str, run) -> None:
     cik_by_ticker = build_ticker_cik_map(fetch_json(TICKER_MAP_URL, user_agent))
 
     frames = []
@@ -103,7 +108,7 @@ def main() -> None:
             print(f"  [{ticker}] fetch failed, skipping: {exc}")
             continue
 
-        df = parse_submissions(payload, ticker, args.forms)
+        df = parse_submissions(payload, ticker, forms)
         if not df.empty:
             frames.append(df)
         else:
@@ -114,9 +119,7 @@ def main() -> None:
         print("No SEC filings collected.")
         return
 
-    combined = pd.concat(frames, ignore_index=True)
-    out_path = save_parquet(combined, "sec_filings.parquet")
-    print(f"Saved {len(combined)} filing rows to {out_path}")
+    run.write(pd.concat(frames, ignore_index=True))
 
 
 if __name__ == "__main__":

@@ -9,14 +9,12 @@ import pandas as pd
 from alpaca.data.historical.news import NewsClient
 from alpaca.data.requests import NewsRequest
 
-from market_data_pipeline.config import DATA_DIR, require_alpaca_credentials
-from market_data_pipeline.picks import RULES_PATH, load_picks, load_rules
-from market_data_pipeline.storage import save_parquet, upsert_to_supabase
+from market_data_pipeline.config import require_alpaca_credentials
+from market_data_pipeline.raw import raw_run
+from market_data_pipeline.tickers import load_tickers
 
-OUTPUT_FILENAME = "news_data.parquet"
 DEFAULT_DAYS = 7
 DEFAULT_LIMIT = 50
-DEFAULT_KEEP_DAYS = 90
 DEFAULT_MAX_TAGGED_FOR_HIGH = 3
 
 # Names used to spot a crypto asset in a headline (article tags use the base ticker, e.g. BTC / BTCUSD).
@@ -27,7 +25,7 @@ CRYPTO_ALIASES = {
 }
 
 COLUMNS = [
-    "id", "ticker", "headline", "summary", "source", "url", "author",
+    "id", "ticker", "headline", "summary", "publisher", "url", "author",
     "created_at", "updated_at", "tagged_symbols", "n_tagged", "relevance",
 ]
 
@@ -87,7 +85,7 @@ def article_rows(
                 "ticker": ticker,
                 "headline": headline,
                 "summary": clean_text(article.summary),
-                "source": clean_text(article.source),
+                "publisher": clean_text(article.source),  # "source" is reserved for raw metadata
                 "url": article.url,
                 "author": clean_text(article.author),
                 "created_at": pd.Timestamp(article.created_at),
@@ -132,59 +130,22 @@ def fetch_news(
     return pd.DataFrame(rows, columns=COLUMNS)
 
 
-def merge_news(existing: pd.DataFrame | None, new: pd.DataFrame, keep_days: int, now: datetime | None = None) -> pd.DataFrame:
-    """Append new rows, keep one row per (id, ticker) with the latest updated_at, and prune old articles."""
-    frames = [f for f in (existing, new) if f is not None and not f.empty]
-    if not frames:
-        return pd.DataFrame(columns=COLUMNS)
-    combined = pd.concat(frames, ignore_index=True)
-    combined = combined.sort_values("updated_at", kind="stable").drop_duplicates(["id", "ticker"], keep="last")
-    cutoff = pd.Timestamp(now or datetime.now(timezone.utc)) - pd.Timedelta(days=keep_days)
-    combined = combined[pd.to_datetime(combined["created_at"], utc=True) >= cutoff]
-    return combined.sort_values(["ticker", "created_at"], ascending=[True, False]).reset_index(drop=True)
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect Alpaca (Benzinga) news for your picks.")
+    parser = argparse.ArgumentParser(description="Collect Alpaca (Benzinga) news into the raw layer.")
     parser.add_argument(
-        "--symbols",
-        nargs="*",
-        default=None,
-        help="Tickers to fetch (crypto as BTC/USD). Default: the confluence report's picks "
-        "(focus list in confluence_report_rules.yaml plus ACCELERATING names in momentum.parquet).",
+        "--symbols", nargs="*", default=None, help="Tickers to fetch (crypto as BTC/USD). Default: the whole universe."
     )
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS, help="How far back each run looks")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Max articles per ticker per run")
-    parser.add_argument(
-        "--keep-days", type=int, default=DEFAULT_KEEP_DAYS, help="Drop stored articles older than this many days"
-    )
     args = parser.parse_args()
 
-    symbols = args.symbols if args.symbols else load_picks()
-    if not symbols:
-        raise SystemExit("No tickers to fetch. Pass --symbols or add names to the focus list in the rules file.")
-
-    news_rules = load_rules(RULES_PATH).get("news", {})
-    max_tagged = news_rules.get("max_tagged_for_high", DEFAULT_MAX_TAGGED_FOR_HIGH)
-    aliases = news_rules.get("aliases", {})
+    tickers = load_tickers()
+    symbols = args.symbols or tickers["equities"] + tickers["crypto"]
     api_key, secret_key = require_alpaca_credentials()
-    print(f"Fetching {args.days}d of news for {len(symbols)} tickers: {', '.join(symbols)}")
-    new = fetch_news(NewsClient(api_key, secret_key), symbols, args.days, args.limit, max_tagged, aliases=aliases)
-    if new.empty:
-        print("No news returned; leaving the existing file untouched.")
-        return
-
-    path = DATA_DIR / OUTPUT_FILENAME
-    existing = pd.read_parquet(path) if path.exists() else None
-    merged = merge_news(existing, new, args.keep_days)
-    save_parquet(merged, OUTPUT_FILENAME)
-    print(f"Saved {len(merged)} article rows ({len(new)} fetched this run) to {path}")
-
-    records = new.assign(
-        created_at=new["created_at"].astype(str), updated_at=new["updated_at"].astype(str)
-    ).to_dict(orient="records")
-    upsert_to_supabase("news_data", records, on_conflict="id,ticker")
-
+    print(f"Fetching {args.days}d of news for {len(symbols)} tickers")
+    params = {"symbols": symbols, "days": args.days, "limit": args.limit}
+    with raw_run("alpaca", "news", params, date_col="created_at") as run:
+        run.write(fetch_news(NewsClient(api_key, secret_key), symbols, args.days, args.limit))
 
 if __name__ == "__main__":
     main()

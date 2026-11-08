@@ -1,0 +1,10 @@
+market_data:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: data/warehouse.duckdb
+      external_root: data/marts
+      threads: 4
+      settings:
+        TimeZone: UTC

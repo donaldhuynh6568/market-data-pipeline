@@ -51,14 +51,3 @@ def test_parse_hyperliquid_matches_positionally_and_skips_missing_coins():
     assert [r["symbol"] for r in rows] == ["ETH/USD"]
     assert rows[0]["mark_price"] == 3000.0
     assert rows[0]["open_interest_usd"] == 150000.0
-
-
-def test_prune_snapshots_keeps_everything_by_default_and_drops_old_rows_when_asked():
-    import pandas as pd
-
-    from market_data_pipeline.collectors.perps import prune_snapshots
-
-    now = pd.Timestamp.now(tz="UTC")
-    df = pd.DataFrame({"symbol": ["BTC/USD"] * 2, "timestamp": [now - pd.Timedelta(days=40), now], "funding_rate": [1.0, 2.0]})
-    assert len(prune_snapshots(df, None)) == 2
-    assert prune_snapshots(df, 30)["funding_rate"].tolist() == [2.0]

@@ -17,16 +17,8 @@ from alpaca.trading.enums import AssetStatus
 from alpaca.trading.requests import GetOptionContractsRequest
 
 from market_data_pipeline.config import require_alpaca_credentials
-from market_data_pipeline.storage import (
-    merge_parquet,
-    prune_old_snapshots,
-    save_parquet,
-    upsert_to_supabase,
-)
+from market_data_pipeline.raw import raw_run
 from market_data_pipeline.tickers import load_tickers
-
-DEFAULT_KEEP_DAYS = 90
-
 
 def get_spot_price(stock_client: StockHistoricalDataClient, symbol: str) -> float | None:
     try:
@@ -133,29 +125,6 @@ def add_chain_snapshot(
     return contracts_df
 
 
-def compute_flow_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    df["vol_oi_ratio"] = df.apply(
-        lambda row: row["volume"] / row["open_interest"] if row["open_interest"] > 0 else None,
-        axis=1,
-    )
-    df["unusual_activity"] = df["vol_oi_ratio"].apply(
-        lambda value: value is not None and value > 1.0
-    )
-
-    put_call = (
-        df.groupby(["underlying_symbol", "type"])["volume"].sum().unstack(fill_value=0)
-    )
-    if "put" in put_call.columns and "call" in put_call.columns:
-        put_call_ratio = (
-            put_call["put"] / put_call["call"].replace(0, pd.NA)
-        ).to_dict()
-    else:
-        put_call_ratio = {}
-    df["put_call_vol_ratio"] = df["underlying_symbol"].map(put_call_ratio)
-    df["volume_zscore"] = None
-    return df
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Collect filtered option activity snapshots.")
     parser.add_argument(
@@ -170,12 +139,6 @@ def main() -> None:
         default=60,
         help="Only include contracts expiring within this many days",
     )
-    parser.add_argument(
-        "--keep-days",
-        type=int,
-        default=DEFAULT_KEEP_DAYS,
-        help="Drop stored snapshots older than this many days (~22k rows per daily snapshot).",
-    )
     args = parser.parse_args()
 
     api_key, secret_key = require_alpaca_credentials()
@@ -184,8 +147,15 @@ def main() -> None:
     stock_client = StockHistoricalDataClient(api_key, secret_key)
     option_client = OptionHistoricalDataClient(api_key, secret_key)
 
+    params = {"moneyness": args.moneyness, "max_expiry_days": args.max_expiry_days, "tickers": tickers["equities"]}
+    # Snapshots cannot be re-fetched later, so every run is kept: raw only appends, nothing is pruned.
+    with raw_run("alpaca", "options_chain", params, date_col="snapshot_date") as run:
+        collect_chains(tickers["equities"], args, trading_client, stock_client, option_client, run)
+
+
+def collect_chains(symbols, args, trading_client, stock_client, option_client, run) -> None:
     all_contracts = []
-    for symbol in tickers["equities"]:
+    for symbol in symbols:
         print(f"Processing {symbol}...")
         spot = get_spot_price(stock_client, symbol)
         if spot is None:
@@ -217,24 +187,8 @@ def main() -> None:
         return
 
     combined = pd.concat(all_contracts, ignore_index=True)
-    combined = compute_flow_metrics(combined)
     combined["snapshot_date"] = date.today().isoformat()
-
-    # Append this snapshot to the stored history; a second run on the same day replaces that day's rows.
-    history = prune_old_snapshots(
-        merge_parquet(combined, "options_data.parquet", ["contract_symbol", "snapshot_date"]), args.keep_days
-    )
-    out_path = save_parquet(history, "options_data.parquet")
-    print(f"\nSaved {len(combined)} contract rows to {out_path} ({len(history)} across all stored snapshots)")
-
-    flagged = combined[combined["unusual_activity"]]
-    print(f"{len(flagged)} contracts flagged for unusual activity (vol/OI > 1.0)")
-
-    records = (
-        combined.astype(object).where(pd.notnull(combined), None).to_dict(orient="records")
-    )
-    upsert_to_supabase("options_data", records, on_conflict="contract_symbol,snapshot_date")
-
+    run.write(combined)
 
 if __name__ == "__main__":
     main()

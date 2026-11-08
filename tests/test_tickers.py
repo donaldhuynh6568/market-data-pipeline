@@ -75,3 +75,21 @@ def test_a_symbol_in_two_categories_is_collected_once():
 
     assert result["equities"] == ["SPY", "XLU", "XLE"]  # first-seen order preserved
     assert result["crypto"] == ["BTC/USD"]
+
+
+def test_universe_frame_flags_cash_like_as_not_rankable_and_dedupes(tmp_path):
+    from market_data_pipeline.tickers import universe_frame
+
+    path = tmp_path / "tickers.yaml"
+    path.write_text(yaml.safe_dump({
+        "equities": {"broad_market": ["SPY", "XLU"], "sectors": ["XLU"], "defensive": ["SHV"]},
+        "crypto": ["BTC/USD"],
+        "cash_like": ["SHV"],
+    }), encoding="utf-8")
+
+    frame = universe_frame(path).set_index("ticker")
+
+    assert list(frame.index) == ["SPY", "XLU", "SHV", "BTC/USD"]
+    assert frame.loc["XLU", "category"] == "broad_market"            # first category wins
+    assert frame.loc["BTC/USD", "asset_class"] == "crypto"
+    assert not frame.loc["SHV", "is_rankable"] and frame.loc["SPY", "is_rankable"]

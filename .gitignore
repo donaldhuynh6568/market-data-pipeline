@@ -11,3 +11,12 @@ __pycache__/
 *.pyc
 .venv/
 .python-version
+
+# dbt build artifacts (the warehouse itself lives under data/)
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+logs/
+
+# Notebook checkpoints
+.ipynb_checkpoints/

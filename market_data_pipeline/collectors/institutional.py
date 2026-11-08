@@ -6,7 +6,8 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 
 from market_data_pipeline.collectors.sec import fetch_json, fetch_text, select_document_by_root_tag
-from market_data_pipeline.config import DATA_DIR, require_sec_user_agent
+from market_data_pipeline.config import require_sec_user_agent
+from market_data_pipeline.raw import raw_run
 
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 FILING_INDEX_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/index.json"
@@ -103,6 +104,11 @@ def main() -> None:
         for name in set(args.only) - set(watchlist):
             print(f"  [{name}] not in DEFAULT_WATCHLIST, skipping")
 
+    with raw_run("sec", "13f", {"watchlist": watchlist}, date_col="report_date") as run:
+        collect_holdings(watchlist, user_agent, run)
+
+
+def collect_holdings(watchlist: dict[str, str], user_agent: str, run) -> None:
     frames = []
     for manager_name, cik_str in watchlist.items():
         cik = int(cik_str)
@@ -137,10 +143,7 @@ def main() -> None:
         print("No 13F holdings collected.")
         return
 
-    combined = pd.concat(frames, ignore_index=True)
-    out_path = DATA_DIR / "institutional_holdings.parquet"
-    combined.to_parquet(out_path, index=False)
-    print(f"Saved {len(combined)} holdings rows to {out_path}")
+    run.write(pd.concat(frames, ignore_index=True))
 
 
 if __name__ == "__main__":

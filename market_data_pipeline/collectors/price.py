@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.enums import Adjustment
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from market_data_pipeline.config import require_alpaca_credentials
-from market_data_pipeline.config import DATA_DIR
-from market_data_pipeline.storage import merge_frames, save_parquet, upsert_to_supabase
+from market_data_pipeline.raw import raw_max, raw_run
 from market_data_pipeline.tickers import load_tickers
 
 TIMEFRAME_CHOICES: dict[str, TimeFrame] = {
@@ -27,9 +27,12 @@ TIMEFRAME_CHOICES: dict[str, TimeFrame] = {
 # UTC and so happened to land hours in the past.
 SIP_DELAY_MINUTES = 16
 
-# Lookback for a first run, a new ticker, or --full. The existing 1H/4H/5m files already hold two years, so the
-# free tier is not capping intraday at ~60 days as this comment used to claim.
+# Lookback for a first run, a new ticker, or --full, unless --start is given.
 DEFAULT_DAYS = 730
+
+# How far back --probe asks for, to find the real history depth the account can get.
+PROBE_START = date(2000, 1, 1)
+PROBE_SYMBOLS = {"equities": ["SPY"], "crypto": ["BTC/USD"]}
 
 # On an incremental run each symbol is re-fetched from its last stored bar minus this overlap. The overlap replaces
 # the bar that was still forming when it was last fetched, and heals a short gap if a run was skipped.
@@ -40,11 +43,12 @@ OVERLAP: dict[str, timedelta] = {
     "5Min": timedelta(days=1),
 }
 
-OUTPUT_FILENAMES: dict[str, str] = {
-    "1Day": "price_data.parquet",
-    "1Hour": "price_data_1h.parquet",
-    "4Hour": "price_data_4h.parquet",
-    "5Min": "price_data_5m.parquet",
+RAW_SOURCE = "alpaca"
+RAW_DATASETS: dict[str, str] = {
+    "1Day": "bars_1d",
+    "1Hour": "bars_1h",
+    "4Hour": "bars_4h",
+    "5Min": "bars_5m",
 }
 
 
@@ -61,6 +65,8 @@ def fetch_equity_bars(
         timeframe=timeframe,
         start=start,
         end=end,
+        # Split- and dividend-adjusted. Unadjusted bars turn every split into a fake crash in the return series.
+        adjustment=Adjustment.ALL,
     )
     bars = client.get_stock_bars(request)
     df = bars.df.reset_index()
@@ -124,26 +130,11 @@ def plan_fetch(
     return groups
 
 
-def shrink_warning(existing: pd.DataFrame | None, days: int, end: datetime) -> str | None:
-    """A --full run replaces the file, so say so when the requested window is shorter than what is stored."""
-    if existing is None or existing.empty:
-        return None
-    cutoff = pd.Timestamp(end - timedelta(days=days))
-    lost = int((existing["timestamp"] < cutoff).sum())
-    if not lost:
-        return None
-    oldest = existing["timestamp"].min().date()
-    return (
-        f"--full with --days {days} drops {lost} stored bars older than {cutoff.date()} (file reaches back to "
-        f"{oldest}). Re-run with a larger --days, or omit --full to keep them."
-    )
-
-
 def collect_bars(
     tickers: dict[str, list[str]], existing: pd.DataFrame | None, days: int, end: datetime, timeframe: TimeFrame,
     overlap: timedelta,
 ) -> pd.DataFrame:
-    """Fetch only what the stored file is missing, for equities and crypto separately."""
+    """Fetch only what raw is missing, for equities and crypto separately."""
     frames = []
     for kind, fetch in (("equities", fetch_equity_bars), ("crypto", fetch_crypto_bars)):
         for symbols, start in plan_fetch(existing, tickers[kind], days, end, overlap):
@@ -153,57 +144,71 @@ def collect_bars(
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def probe_history_depth(end: datetime) -> None:
+    """Print the earliest daily bar Alpaca returns for one stock and one crypto pair. Writes nothing."""
+    start = datetime.combine(PROBE_START, datetime.min.time(), tzinfo=timezone.utc)
+    for kind, fetch in (("equities", fetch_equity_bars), ("crypto", fetch_crypto_bars)):
+        for symbol in PROBE_SYMBOLS[kind]:
+            df = fetch([symbol], start, end, TIMEFRAME_CHOICES["1Day"])
+            if df.empty:
+                print(f"  {symbol}: no bars returned since {PROBE_START}")
+            else:
+                print(f"  {symbol}: earliest bar {df['timestamp'].min():%Y-%m-%d}, {len(df)} daily bars")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect market price data.")
+    parser = argparse.ArgumentParser(description="Collect Alpaca bars into the raw layer.")
     parser.add_argument(
         "--days",
         type=int,
         default=DEFAULT_DAYS,
         help=f"Lookback window in days (default {DEFAULT_DAYS}) for a first run, a newly added ticker or --full. "
-        "Routine refreshes only fetch what is newer than the stored file.",
+        "Routine refreshes only fetch what is newer than what raw already holds.",
+    )
+    parser.add_argument(
+        "--start",
+        type=date.fromisoformat,
+        help="Backfill from this date (YYYY-MM-DD) instead of --days. Implies --full.",
     )
     parser.add_argument(
         "--timeframe",
         choices=sorted(TIMEFRAME_CHOICES),
         default="1Day",
-        help="Bar granularity. 1Day writes price_data.parquet (default, backward compatible); "
-        "1Hour/4Hour/5Min write to their own files so they never overwrite the daily dataset.",
+        help="Bar granularity; each lands in its own raw dataset (alpaca/bars_1d, bars_1h, ...).",
     )
     parser.add_argument(
         "--full",
         action="store_true",
-        help="Re-download the whole --days window and overwrite the file. Without it, a refresh fetches only "
-        "bars newer than what is already stored and appends them; --days then only sizes a first run or a new ticker.",
+        help="Re-download the whole window for every symbol, ignoring what raw already holds. Raw only ever "
+        "appends, so this never loses data; staging keeps the newest copy of each bar.",
+    )
+    parser.add_argument(
+        "--probe", action="store_true", help="Report how far back daily history goes for SPY and BTC/USD, then exit."
     )
     args = parser.parse_args()
 
-    timeframe = TIMEFRAME_CHOICES[args.timeframe]
-    tickers = load_tickers()
     end = datetime.now(timezone.utc) - timedelta(minutes=SIP_DELAY_MINUTES)
-
-    out_filename = OUTPUT_FILENAMES[args.timeframe]
-    out_path = DATA_DIR / out_filename
-    stored = pd.read_parquet(out_path) if out_path.exists() else None
-    if args.full and (warning := shrink_warning(stored, args.days, end)):
-        print(f"WARNING: {warning}")
-    known = None if args.full else stored
-
-    print(
-        f"{'Rebuilding' if known is None else 'Refreshing'} {args.timeframe} bars for {len(tickers['equities'])} "
-        f"equities and {len(tickers['crypto'])} crypto pairs..."
-    )
-    fetched = collect_bars(tickers, known, args.days, end, timeframe, OVERLAP[args.timeframe])
-    if fetched.empty:
-        print("No data returned - check your ticker list and API keys. Existing file left untouched.")
+    if args.probe:
+        probe_history_depth(end)
         return
 
-    combined = merge_frames(known, fetched, keys=["symbol", "timestamp"])
-    price_path = save_parquet(combined, out_filename)
-    added = len(combined) - (len(known) if known is not None else 0)
-    print(f"Saved {len(combined)} rows to {price_path} ({len(fetched)} fetched, {added} new)")
+    days = (end.date() - args.start).days if args.start else args.days
+    timeframe = TIMEFRAME_CHOICES[args.timeframe]
+    dataset = RAW_DATASETS[args.timeframe]
+    tickers = load_tickers()
+    known = None if (args.full or args.start) else raw_max(RAW_SOURCE, dataset, "symbol", "timestamp")
 
-    records = fetched.assign(timestamp=fetched["timestamp"].astype(str)).to_dict(orient="records")
-    upsert_to_supabase("price_data", records, on_conflict="symbol,timestamp")
+    print(
+        f"{'Backfilling' if known is None or known.empty else 'Refreshing'} {args.timeframe} bars for "
+        f"{len(tickers['equities'])} equities and {len(tickers['crypto'])} crypto pairs..."
+    )
+    params = {"timeframe": args.timeframe, "days": days, "full": bool(args.full or args.start), "end": end}
+    with raw_run(RAW_SOURCE, dataset, params, date_col="timestamp") as run:
+        fetched = collect_bars(tickers, known, days, end, timeframe, OVERLAP[args.timeframe])
+        if fetched.empty:
+            print("No data returned - check your ticker list and API keys.")
+            return
+        run.write(fetched)
 
 
 if __name__ == "__main__":

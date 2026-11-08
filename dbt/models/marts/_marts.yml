@@ -1,0 +1,107 @@
+version: 2
+
+models:
+  - name: mart_price_daily
+    description: Daily spine (trading calendar x universe) with capped forward fill and daily returns.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [ticker, date]}
+      - expression_is_true:
+          arguments: {expression: "close > 0", where_clause: "close is not null"}
+      - expression_is_true:
+          arguments: {expression: "days_since_update >= 0"}
+
+  - name: mart_targets
+    description: Forward returns and their cross-sectional rank. Targets only, never features.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [ticker, date]}
+      - equal_row_count:
+          arguments: {compare_model: ref('mart_price_daily')}
+
+  - name: mart_features
+    description: Daily momentum, volatility, trend and regime features (see config/feature_registry.yaml).
+    data_tests:
+      - unique_key:
+          arguments: {columns: [ticker, date]}
+      - equal_row_count:
+          arguments: {compare_model: ref('mart_price_daily')}
+      - expression_is_true:
+          # Point in time: no VIX value is used before it was published.
+          arguments: {expression: "vix_available_at <= date", where_clause: "vix is not null"}
+      - expression_is_true:
+          arguments: {expression: "mom_rank >= 1", where_clause: "mom_rank is not null"}
+
+  - name: mart_split
+    description: Date to train / validation / test / gap.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [date]}
+    columns:
+      - name: split
+        data_tests:
+          - accepted_values:
+              arguments: {values: [train, validation, test, gap]}
+
+  - name: mart_rebalance_dates
+    description: Monthly signal, entry and exit dates.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [rebalance_date]}
+      - expression_is_true:
+          arguments: {expression: "entry_date > rebalance_date"}
+      - expression_is_true:
+          arguments: {expression: "exit_date > entry_date", where_clause: "exit_date is not null"}
+
+  - name: mart_signals
+    description: Target weights per variant (momentum top-N, trend-filtered, equal-weight, SPY buy-and-hold).
+    data_tests:
+      - unique_key:
+          arguments: {columns: [variant, ticker, rebalance_date]}
+      - expression_is_true:
+          arguments: {expression: "weight >= 0 and weight <= 1"}
+
+  - name: mart_quintiles
+    description: Mean forward return by momentum quintile, per reported split.
+    data_tests:
+      - unique_key:
+          arguments: {columns: [split, quintile]}
+
+unit_tests:
+  - name: forward_return_looks_forward_by_exactly_the_horizon
+    description: >
+      Hand-computed: with horizon 2, the target on day t is close[t+2] / close[t] - 1 within the same ticker,
+      null for the last two days, and only rankable tickers get a rank. Catches the shift bug (lag instead of
+      lead, or horizon off by one) that would turn the target into a leak.
+    model: mart_targets
+    overrides:
+      vars: {target_horizon: 2}
+    given:
+      - input: ref('mart_price_daily')
+        rows:
+          - {ticker: A, date: 2026-01-05, is_rankable: true, close: 100}
+          - {ticker: A, date: 2026-01-06, is_rankable: true, close: 200}
+          - {ticker: A, date: 2026-01-07, is_rankable: true, close: 150}
+          - {ticker: A, date: 2026-01-08, is_rankable: true, close: 50}
+          - {ticker: B, date: 2026-01-05, is_rankable: true, close: 40}
+          - {ticker: B, date: 2026-01-06, is_rankable: true, close: 10}
+          - {ticker: B, date: 2026-01-07, is_rankable: true, close: 50}
+          - {ticker: B, date: 2026-01-08, is_rankable: true, close: 20}
+          - {ticker: C, date: 2026-01-05, is_rankable: false, close: 10}
+          - {ticker: C, date: 2026-01-06, is_rankable: false, close: 10}
+          - {ticker: C, date: 2026-01-07, is_rankable: false, close: 30}
+          - {ticker: C, date: 2026-01-08, is_rankable: false, close: 10}
+    expect:
+      rows:
+        - {ticker: A, date: 2026-01-05, fwd_ret: 0.5, fwd_rank: 1}
+        - {ticker: A, date: 2026-01-06, fwd_ret: -0.75, fwd_rank: 2}
+        - {ticker: A, date: 2026-01-07, fwd_ret: null, fwd_rank: null}
+        - {ticker: A, date: 2026-01-08, fwd_ret: null, fwd_rank: null}
+        - {ticker: B, date: 2026-01-05, fwd_ret: 0.25, fwd_rank: 2}
+        - {ticker: B, date: 2026-01-06, fwd_ret: 1.0, fwd_rank: 1}
+        - {ticker: B, date: 2026-01-07, fwd_ret: null, fwd_rank: null}
+        - {ticker: B, date: 2026-01-08, fwd_ret: null, fwd_rank: null}
+        - {ticker: C, date: 2026-01-05, fwd_ret: 2.0, fwd_rank: null}
+        - {ticker: C, date: 2026-01-06, fwd_ret: 0.0, fwd_rank: null}
+        - {ticker: C, date: 2026-01-07, fwd_ret: null, fwd_rank: null}
+        - {ticker: C, date: 2026-01-08, fwd_ret: null, fwd_rank: null}

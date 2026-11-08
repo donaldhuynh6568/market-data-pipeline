@@ -1,0 +1,29 @@
+version: 2
+
+# Raw is hive-partitioned parquet written by the collectors (market_data_pipeline/raw.py):
+#   data/raw/<source>/<dataset>/ingest_date=YYYY-MM-DD/part-*.parquet
+# union_by_name lets a later run add a column without breaking older files.
+sources:
+  - name: raw
+    tables:
+      - name: alpaca_bars_1d
+        description: Alpaca daily bars (split/dividend adjusted), stocks and crypto, as received.
+        config:
+          meta:
+            external_location: "read_parquet('data/raw/alpaca/bars_1d/*/*.parquet', hive_partitioning = true, union_by_name = true)"
+          loaded_at_field: ingested_at
+          freshness:
+            warn_after: {count: 4, period: day}
+      - name: fred_series
+        description: FRED observations for the configured series, as received.
+        config:
+          meta:
+            external_location: "read_parquet('data/raw/fred/series/*/*.parquet', hive_partitioning = true, union_by_name = true)"
+          loaded_at_field: ingested_at
+          freshness:
+            warn_after: {count: 7, period: day}
+      - name: manifest
+        description: One row per collector run (status, row count, date range).
+        config:
+          meta:
+            external_location: "read_parquet('data/raw/_manifest/*/*.parquet', hive_partitioning = true, union_by_name = true)"

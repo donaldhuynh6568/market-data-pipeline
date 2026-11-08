@@ -7,7 +7,6 @@ from market_data_pipeline.collectors.deribit_options import (
     build_chain,
     parse_instrument,
 )
-from market_data_pipeline.transforms.gex import compute_gex
 
 NOW = datetime(2026, 9, 19, 12, tzinfo=timezone.utc)
 
@@ -36,7 +35,7 @@ def _summaries():
     ]
 
 
-def test_build_chain_filters_and_shapes_columns_for_gex():
+def test_build_chain_filters_and_shapes_columns():
     chain = build_chain("BTC", _summaries(), spot=60000.0, now=NOW, moneyness=0.2, max_expiry_days=60)
 
     assert len(chain) == 2
@@ -45,15 +44,4 @@ def test_build_chain_filters_and_shapes_columns_for_gex():
     assert (chain["contract_multiplier"] == 1).all()
     assert (chain["implied_volatility"] == 0.5).all()
 
-    gex = compute_gex(chain)
-    assert list(gex["symbol"]) == ["BTC/USD"]
-    assert gex.iloc[0]["gamma_regime"] in {"POSITIVE_GAMMA", "NEGATIVE_GAMMA", "NEAR_FLIP"}
-
-
-def test_contract_multiplier_scales_gex_relative_to_equity_default():
-    chain = build_chain("BTC", _summaries(), spot=60000.0, now=NOW, moneyness=0.2, max_expiry_days=60)
-    default_multiplier = chain.drop(columns="contract_multiplier")
-
-    ratio = compute_gex(default_multiplier).iloc[0]["total_gamma"] / compute_gex(chain).iloc[0]["total_gamma"]
-
-    assert ratio == pytest.approx(100.0)
+    assert (chain["snapshot_date"] == NOW.date().isoformat()).all()

@@ -6,7 +6,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from market_data_pipeline.config import DATA_DIR
+from market_data_pipeline.raw import raw_run
 from market_data_pipeline.tickers import load_tickers
 
 SENATE_TRANSACTIONS_URL = (
@@ -46,17 +46,15 @@ def main() -> None:
     tickers = args.tickers or load_tickers()["equities"]
 
     print(f"NOTE: {DATA_COVERAGE_NOTE}")
-    print("Fetching Senate Stock Watcher data...")
-    payload = fetch_senate_transactions()
+    with raw_run("senate_watcher", "trades", {"tickers": tickers}) as run:  # mm/dd/yyyy dates, not sortable
+        print("Fetching Senate Stock Watcher data...")
+        payload = fetch_senate_transactions()
 
-    filtered = parse_senate_transactions(payload, tickers)
-    if filtered.empty:
-        print("No matching congressional trades found for the configured tickers.")
-        return
-
-    out_path = DATA_DIR / "congress_trades.parquet"
-    filtered.to_parquet(out_path, index=False)
-    print(f"Saved {len(filtered)} congressional trade rows to {out_path}")
+        filtered = parse_senate_transactions(payload, tickers)
+        if filtered.empty:
+            print("No matching congressional trades found for the configured tickers.")
+            return
+        run.write(filtered)
 
 
 if __name__ == "__main__":

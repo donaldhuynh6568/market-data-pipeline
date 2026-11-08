@@ -1,0 +1,31 @@
+# Every column of mart_features, with its role. market_data_pipeline.build fails if the mart and this list
+# disagree, so a column cannot appear in (or vanish from) the features without being declared here.
+#   id       keys and descriptors, never fed to a signal
+#   feature  usable by a signal or model
+#   drop     audit/helper columns kept for checks, not for signals
+# Targets (forward returns) are NOT here: they live in mart_targets, and a name starting with fwd_ is refused.
+columns:
+  ticker: id
+  date: id
+  asset_class: id
+  is_rankable: id
+  ret_1d: feature
+  ret_21: feature
+  ret_63: feature
+  ret_126: feature
+  ret_252: feature
+  ret_252_skip21: feature
+  vol_21: feature
+  vol_63: feature
+  mom_score: feature
+  mom_rank: feature
+  dist_ma200: feature
+  above_ma200: feature
+  spy_above_ma200: feature
+  qqq_above_ma200: feature
+  trend_risk_on: feature
+  vix: feature
+  vix_days_since_update: drop
+  vix_available_at: drop
+  month: feature
+  turn_of_month: feature

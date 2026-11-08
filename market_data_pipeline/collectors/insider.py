@@ -13,7 +13,8 @@ from market_data_pipeline.collectors.sec import (
     fetch_text,
     select_document_by_root_tag,
 )
-from market_data_pipeline.config import DATA_DIR, require_sec_user_agent
+from market_data_pipeline.config import require_sec_user_agent
+from market_data_pipeline.raw import raw_run
 from market_data_pipeline.tickers import load_equity_category
 
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
@@ -117,6 +118,11 @@ def main() -> None:
         print("No large_cap tickers configured in tickers.yaml, nothing to do.")
         return
 
+    with raw_run("sec", "form4", {"count": args.count, "tickers": tickers}, date_col="transaction_date") as run:
+        collect_insider(tickers, args.count, user_agent, run)
+
+
+def collect_insider(tickers: list[str], count: int, user_agent: str, run) -> None:
     cik_by_ticker = build_ticker_cik_map(fetch_json(TICKER_MAP_URL, user_agent))
 
     frames = []
@@ -128,7 +134,7 @@ def main() -> None:
 
         print(f"Fetching Form 4 filings for {ticker}...")
         try:
-            filings = fetch_recent_form4_filings(cik, user_agent, args.count)
+            filings = fetch_recent_form4_filings(cik, user_agent, count)
         except Exception as exc:  # pragma: no cover - external API
             print(f"  [{ticker}] failed to list filings, skipping: {exc}")
             continue
@@ -153,10 +159,7 @@ def main() -> None:
         print("No insider transactions collected.")
         return
 
-    combined = pd.concat(frames, ignore_index=True)
-    out_path = DATA_DIR / "insider_trades.parquet"
-    combined.to_parquet(out_path, index=False)
-    print(f"Saved {len(combined)} insider transaction rows to {out_path}")
+    run.write(pd.concat(frames, ignore_index=True))
 
 
 if __name__ == "__main__":

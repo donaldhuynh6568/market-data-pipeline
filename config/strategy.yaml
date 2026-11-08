@@ -1,0 +1,53 @@
+# Track A (momentum rotation) parameters. PROVISIONAL defaults: every value here answers an OPEN item in
+# reference/analysis_strategy_spec.md and can be changed without touching code. dbt receives these as --vars
+# (market_data_pipeline/settings.py); the simulation reads this file directly.
+
+# --- calendar and timing --------------------------------------------------------------------------------------
+# The signal is read at the close of the last trading day of each month; the trade fills `execution_lag_days`
+# trading days later (the first trading day of the next month), at that day's close.
+execution_lag_days: 1
+
+# Capped forward fill: a price older than this many calendar days is treated as missing, never carried on.
+ffill_cap_days: 5
+
+# --- targets --------------------------------------------------------------------------------------------------
+# Forward return horizon in trading days (about one month, matching the monthly holding period).
+target_horizon: 21
+
+# --- splits ---------------------------------------------------------------------------------------------------
+# Fractions of the usable date range (from the first date with a 200-day MA on SPY). A gap of target_horizon
+# trading days is left before each boundary so overlapping forward returns never straddle two splits.
+split:
+  train: 0.70
+  validation: 0.15
+  test: 0.15
+# The test split stays untouched until the strategy is frozen: reports include it only with --include-test.
+report_splits: [train, validation]
+
+# --- portfolio ------------------------------------------------------------------------------------------------
+top_n_grid: [1, 2, 3, 5]
+trend_filter:
+  indices: [SPY, QQQ]       # risk-off only when ALL of these are below their 200-day MA
+  defensive_asset: GLD
+
+# Cost per side (buy or sell), as a fraction of traded value. Round trip = 2x.
+cost_per_side:
+  equity: 0.0010
+  crypto: 0.0025
+
+# --- baselines and keep-or-cut ------------------------------------------------------------------------------------
+random_draws: 200
+random_seed: 20261022
+# A variant is a KEEP candidate only if, in the validation split, it beats equal-weight and SPY on net CAGR,
+# beats this share of same-size random draws, AND has at least this many rebalances behind the result.
+random_pctile_to_beat: 0.95
+min_rebalances_to_trust: 36
+
+# --- point-in-time lags for slow data ---------------------------------------------------------------------------
+# FRED observation dates are period starts (monthly = 1st of the month); a value is usable from
+# observation_date + lag. Frequency is inferred per series from the spacing of its observations.
+fred_lag_days:
+  daily: 1
+  weekly: 7
+  monthly: 45
+  quarterly: 120

@@ -1,6 +1,29 @@
-# Analysis Strategy Spec (v0, draft)
+# Analysis Strategy Spec (v1)
 
 Companion to `market_analysis_restart_spec.md`. This defines how we analyze and evaluate, so the marts can be shaped to serve it. Items marked **OPEN** are gaps to fill in.
+
+## Decisions taken in the v1 build (2026-10-22)
+
+These answer the section 11 questions provisionally. Every value is in `config/strategy.yaml` and can change without touching code.
+
+| # | Question | v1 answer |
+|---|---|---|
+| 1 | Track B in scope? | **Deferred** until Track A is validated and history is deeper |
+| 2 | Features and windows | 1, 3, 6 and 12-month returns plus a 12-month return skipping the latest month; 1 and 3-month volatility; score = 3-month return ÷ 3-month volatility; distance from the 200-day MA plus SPY/QQQ flags; VIX; month and turn-of-month. No technical indicators yet. Registry: `config/feature_registry.yaml` |
+| 3 | Target | Forward return over 21 trading days, plus its rank and an above-median flag (`mart_targets`). Raw return, not excess return |
+| 4 | Splits and minimum history | 70/15/15 by date from the first full SPY 200-day MA (2016-10), with 21-day gaps. Minimum history = a full 3-month score (64 bars) |
+| 5 | Trust threshold and benchmark | `min_rebalances_to_trust: 36`; beat ≥ 95% of same-size random draws; benchmark SPY plus equal-weight |
+| 6 | Costs | 0.10% per side for equities, 0.25% per side for crypto; no separate slippage |
+| 7 | Top N, weighting, rebalance day, vol scaling | Grid {1, 2, 3, 5}, equal weight; signal at the month-end close, fill at the next close; no vol scaling yet |
+| 8 | History depth | Alpaca: equities from 2016-01-04, crypto from 2021-01-01. Second source still **OPEN** |
+| 9 | Earnings dates | **OPEN** (no source) |
+| 10 | Daily vs rebalance grain | Features are built daily, and signals sample them at rebalance dates |
+
+**As-built deviations:**
+- The target unit test is a dbt unit test on the `forward_return` macro (`dbt/models/marts/_marts.yml`).
+- The simulation and performance marts are Python (`market_data_pipeline/sim/`).
+- Random baselines are 200 seeded draws per top-N. Each momentum variant gets a `random_pctile` (its place among the draws).
+- Results are in `mart_performance`, the notebook `notebooks/mart_review.ipynb` and the Excel output of `python -m market_data_pipeline.review`.
 
 Source material: zoomcamp modules 2 (unified dataset), 3 (time series modeling), 4 (trading simulation). Only lessons that change a design decision are carried in.
 
